@@ -4,12 +4,15 @@
 #include "llama-model.h"
 #include "llama-batch.h"
 #include "llama-cparams.h"
+#include "llama-sampler.h"
 
 #include "llama-kv-cache.h"
 #include "llama-kv-cache-iswa.h"
 #include "llama-kv-cache-dsa.h"
+#include "llama-kv-cache-dsa-iswa.h"
 #include "llama-kv-cache-msa.h"
 #include "llama-kv-cache-dsv4.h"
+#include "llama-kv-cache-kpool.h"
 #include "llama-memory-hybrid.h"
 #include "llama-memory-hybrid-iswa.h"
 #include "llama-memory-recurrent.h"
@@ -542,10 +545,12 @@ void llm_graph_input_attn_k::set_input(const llama_ubatch * ubatch) {
 }
 
 bool llm_graph_input_attn_k::can_reuse(const llm_graph_params & params) {
-    const auto * mctx = static_cast<const llama_kv_cache_context *>(params.mctx);
+    mctx = static_cast<const llama_kv_cache_context *>(params.mctx);
 
-    this->mctx = mctx;
+    return can_reuse_impl(params);
+}
 
+bool llm_graph_input_attn_k::can_reuse_impl(const llm_graph_params & params) {
     bool res = true;
 
     res &= self_k_idxs->ne[0] == params.ubatch.n_tokens;
@@ -602,10 +607,12 @@ void llm_graph_input_attn_k_dsa::set_input(const llama_ubatch * ubatch) {
 }
 
 bool llm_graph_input_attn_k_dsa::can_reuse(const llm_graph_params & params) {
-    const auto * mctx = static_cast<const llama_kv_cache_dsa_context *>(params.mctx);
+    mctx = static_cast<const llama_kv_cache_dsa_context *>(params.mctx);
 
-    this->mctx = mctx;
+    return can_reuse_impl(params);
+}
 
+bool llm_graph_input_attn_k_dsa::can_reuse_impl(const llm_graph_params & params) {
     bool res = true;
 
     res &= self_k_idxs_mla->ne[0] == params.ubatch.n_tokens;
@@ -617,9 +624,24 @@ bool llm_graph_input_attn_k_dsa::can_reuse(const llm_graph_params & params) {
     return res;
 }
 
+void llm_graph_input_attn_k_dsa_iswa::set_input(const llama_ubatch * ubatch) {
+    inp_dsa->set_input(ubatch);
+    inp_swa->set_input(ubatch);
+}
 
-// dsv4 helpers
+bool llm_graph_input_attn_k_dsa_iswa::can_reuse(const llm_graph_params & params) {
+    mctx = static_cast<const llama_kv_cache_dsa_iswa_context *>(params.mctx);
 
+    inp_dsa->mctx = mctx->get_dsa();
+    inp_swa->mctx = mctx->get_swa();
+
+    bool res = true;
+
+    res &= inp_dsa->can_reuse_impl(params);
+    res &= inp_swa->can_reuse_impl(params);
+
+    return res;
+}
 
 void llm_graph_input_attn_kv_iswa::set_input(const llama_ubatch * ubatch) {
     // base tensors may not be allocated if there are no non-SWA attention layers
@@ -1395,24 +1417,24 @@ void llm_graph_result::set_outputs(const llm_graph_params & params) {
             }
         }
     }
-    for (auto & [seq_id, t] : t_sampled) {
-        if (t != nullptr) {
-            ggml_set_output(t);
+    for (auto * tensor : t_sampled) {
+        if (tensor != nullptr) {
+            ggml_set_output(tensor);
         }
     }
-    for (auto & [seq_id, t] : t_sampled_probs) {
-        if (t != nullptr) {
-            ggml_set_output(t);
+    for (auto * tensor : t_sampled_probs) {
+        if (tensor != nullptr) {
+            ggml_set_output(tensor);
         }
     }
-    for (auto & [seq_id, t] : t_sampled_logits) {
-        if (t != nullptr) {
-            ggml_set_output(t);
+    for (auto * tensor : t_sampled_logits) {
+        if (tensor != nullptr) {
+            ggml_set_output(tensor);
         }
     }
-    for (auto & [seq_id, t] : t_candidates) {
-        if (t != nullptr) {
-            ggml_set_output(t);
+    for (auto * tensor : t_candidates) {
+        if (tensor != nullptr) {
+            ggml_set_output(tensor);
         }
     }
 }
@@ -1781,7 +1803,7 @@ ggml_tensor * llm_graph_context::build_ffn(
                         tmp = ggml_clamp(ctx0, tmp, -limit, limit);
                         cb(tmp, "ffn_up_clamped", il);
 
-                        if (arch == LLM_ARCH_DEEPSEEK4 || (arch == LLM_ARCH_DFLASH && hparams.dsv4_hc_mult > 0)) {
+                        if (arch == LLM_ARCH_DEEPSEEK4 || arch == LLM_ARCH_GLM5NEXT || (arch == LLM_ARCH_DFLASH && hparams.dsv4_hc_mult > 0)) {
                             cur = ggml_clamp(ctx0, cur, -INFINITY, limit);
                             cb(cur, "ffn_gate_clamped", il);
                             cur = ggml_swiglu_split(ctx0, cur, tmp);
@@ -1861,6 +1883,8 @@ ggml_tensor * llm_graph_context::build_ffn(
                 cur = ggml_reglu(ctx0, cur);
                 cb(cur, "ffn_reglu", il);
             } break;
+        case LLM_FFN_SITU:
+            GGML_ABORT("not yet supported");
         default:
             GGML_ABORT("fatal error");
     }
@@ -2178,7 +2202,7 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
                         up = ggml_clamp(ctx0, up, -limit, limit);
                         cb(up, "ffn_moe_up_clamped", il);
 
-                        if (arch == LLM_ARCH_DEEPSEEK4 || (arch == LLM_ARCH_DFLASH && hparams.dsv4_hc_mult > 0)) {
+                        if (arch == LLM_ARCH_DEEPSEEK4 || arch == LLM_ARCH_GLM5NEXT || (arch == LLM_ARCH_DFLASH && hparams.dsv4_hc_mult > 0)) {
                             cur = ggml_clamp(ctx0, cur, -INFINITY, limit);
                             cb(cur, "ffn_moe_gate_clamped", il);
                             cur = ggml_swiglu_split(ctx0, cur, up);
@@ -2201,6 +2225,21 @@ ggml_tensor * llm_graph_context::build_moe_ffn(
             } else {
                 cur = ggml_silu(ctx0, cur);
                 cb(cur, "ffn_moe_silu", il);
+            } break;
+        case LLM_FFN_SITU:
+            {
+                // situ(gate, up) = beta*tanh(gate/beta)*sigmoid(gate) * lb*tanh(up/lb)
+                GGML_ASSERT(has_gate);
+                const float beta = hparams.situ_beta;
+                const float lb   = hparams.situ_linear_beta;
+
+                ggml_tensor * act = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, cur, 1.0f/beta)), beta);
+                act = ggml_mul(ctx0, act, ggml_sigmoid(ctx0, cur));
+                if (lb > 0.0f) {
+                    up = ggml_scale(ctx0, ggml_tanh(ctx0, ggml_scale(ctx0, up, 1.0f/lb)), lb);
+                }
+                cur = ggml_mul(ctx0, act, up);
+                cb(cur, "ffn_moe_situ", il);
             } break;
         case LLM_FFN_GELU:
             if (has_gate) {
@@ -3272,8 +3311,6 @@ ggml_tensor * llm_graph_context::build_attn(
             int       il) const {
     const bool is_swa = hparams.is_swa(il);
 
-    GGML_UNUSED(v_cur);
-
     auto * k_rot = is_swa ? inp->self_k_rot_swa : inp->self_k_rot;
 
     if (k_rot) {
@@ -3306,7 +3343,7 @@ ggml_tensor * llm_graph_context::build_attn(
     // MLA-style attention: the cached K is used as V
     ggml_tensor * q = q_cur;
     ggml_tensor * k = mctx_cur->get_k(ctx0, il);
-    ggml_tensor * v = k;
+    ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
 
     ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, kq_mask, sinks, v_mla, kq_scale, il);
     cb(cur, "kqv_out", il);
@@ -3385,8 +3422,12 @@ ggml_tensor * llm_graph_context::build_attn(
     return cur;
 }
 
-llm_graph_input_attn_k_dsa * llm_graph_context::build_attn_inp_k_dsa() const {
-    const auto * mctx_cur = static_cast<const llama_kv_cache_dsa_context *>(mctx);
+static std::unique_ptr<llm_graph_input_attn_k_dsa> build_attn_inp_k_dsa_impl(
+           ggml_context * ctx0,
+     const llama_ubatch & ubatch,
+    const llama_hparams & hparams,
+    const llama_cparams & cparams,
+    const llama_kv_cache_dsa_context * mctx_cur) {
 
     auto inp = std::make_unique<llm_graph_input_attn_k_dsa>(hparams, cparams, mctx_cur);
 
@@ -3410,7 +3451,33 @@ llm_graph_input_attn_k_dsa * llm_graph_context::build_attn_inp_k_dsa() const {
         inp->self_k_rot_lid = mctx_cur->get_lid()->build_input_k_rot(ctx0);
     }
 
+    return inp;
+}
+
+llm_graph_input_attn_k_dsa * llm_graph_context::build_attn_inp_k_dsa() const {
+    const auto * mctx_cur = static_cast<const llama_kv_cache_dsa_context *>(mctx);
+
+    auto inp = build_attn_inp_k_dsa_impl(ctx0, ubatch, hparams, cparams, mctx_cur);
+
     return (llm_graph_input_attn_k_dsa *) res->add_input(std::move(inp));
+}
+
+llm_graph_input_attn_k_dsa_iswa * llm_graph_context::build_attn_inp_k_dsa_iswa() const {
+    const auto * mctx_cur = static_cast<const llama_kv_cache_dsa_iswa_context *>(mctx);
+
+    auto inp_dsa = build_attn_inp_k_dsa_impl(ctx0, ubatch, hparams, cparams, mctx_cur->get_dsa());
+
+    // build_attn_inp_k_impl rejects SWA caches, so construct the input directly
+    auto inp_swa = std::make_unique<llm_graph_input_attn_k>(hparams, cparams, mctx_cur->get_swa());
+
+    inp_swa->self_k_idxs = mctx_cur->get_swa()->build_input_k_idxs(ctx0, ubatch);
+
+    inp_swa->self_kq_mask = build_attn_inp_kq_mask(ctx0, mctx_cur->get_swa(), ubatch, cparams);
+    inp_swa->self_kq_mask_cnv = inp_swa->self_kq_mask;
+
+    auto inp = std::make_unique<llm_graph_input_attn_k_dsa_iswa>(std::move(inp_dsa), std::move(inp_swa), mctx_cur);
+
+    return (llm_graph_input_attn_k_dsa_iswa *) res->add_input(std::move(inp));
 }
 
 llm_graph_input_attn_kv_msa * llm_graph_context::build_attn_inp_kv_msa(bool msa_enabled) const {
@@ -3673,6 +3740,220 @@ llm_graph_input_mem_hybrid_k * llm_graph_context::build_inp_mem_hybrid_k() const
     return (llm_graph_input_mem_hybrid_k *) res->add_input(std::move(inp));
 }
 
+llm_graph_input_kpool * llm_graph_context::build_inp_kpool(
+        const llama_memory_hybrid_context * mctx_cur,
+        ggml_tensor * kq_mask,
+        bool scoring) const {
+    const auto * mctx_attn = mctx_cur->get_attn();
+    const auto * mctx_idx  = mctx_cur->get_idx();
+
+    GGML_ASSERT(mctx_idx != nullptr && "a pooled indexer needs the indexer KV cache");
+
+    const uint32_t kpool = hparams.indexer_kpool;
+    GGML_ASSERT(kpool > 0);
+
+    auto inp = std::make_unique<llm_graph_input_kpool>(mctx_attn, mctx_idx, kpool);
+
+    inp->k_idxs = mctx_idx->build_input_k_idxs(ctx0, ubatch);
+    ggml_set_input(inp->k_idxs);
+    ggml_set_name(inp->k_idxs, "kpool_k_idxs");
+
+    if (scoring) {
+        const int64_t n_kv = mctx_attn->get_n_kv();
+
+        // spelled exactly as build_attn_inp_kq_mask spells it, so that sel_mask,
+        // cand_mask and the KQ mask are the same shape and add without a
+        // broadcast. get_n_stream() is the cache's stream RANGE and is a
+        // different number as soon as a server has non-contiguous slots busy
+        const int64_t n_stream = cparams.kv_unified ? 1 : ubatch.n_seqs_unq;
+        const int64_t n_tps    = ubatch.n_tokens/n_stream;
+
+        // one pool map per SEQUENCE. a non-unified cache has one sequence per stream, a
+        // unified cache puts every sequence of the ubatch in stream 0 and cuts the
+        // stream's pool table into one run per sequence, so the table needs the rebasing
+        // slack once per sequence. sized on the ubatch and not on n_seq_max, which
+        // llama-embedding sets to 256; n_seqs_unq is already part of
+        // llm_graph_params::allow_reuse, so the shape holds while a graph is reused
+        const int64_t n_ps = (int64_t) ubatch.n_seqs_unq/n_stream;
+
+        GGML_ASSERT(n_ps >= 1 && (int64_t) ubatch.n_seqs_unq == n_ps*n_stream);
+
+        const int64_t n_pools = llama_kpool_n_pools(n_kv, kpool, n_ps);
+
+        GGML_ASSERT(kq_mask->ne[0] == n_kv && kq_mask->ne[3] == n_stream);
+
+        // this tree's build_attn_inp_kq_mask has no GGML_KQ_MASK_PAD, so the mask
+        // is exactly n_tps rows. the host side supports n_padq > n_tps, the graph
+        // below does not: the selection terms only exist for real queries
+        GGML_ASSERT(kq_mask->ne[1] == n_tps && "the pooled indexer needs an unpadded KQ mask");
+
+        inp->pool_cells = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, kpool*n_pools, n_stream);
+        ggml_set_input(inp->pool_cells);
+        ggml_set_name(inp->pool_cells, "kpool_pool_cells");
+
+        inp->pool_bias = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, n_pools, n_tps, n_stream);
+        ggml_set_input(inp->pool_bias);
+        ggml_set_name(inp->pool_bias, "kpool_pool_bias");
+
+        // the fused lightning indexer wants an f16 mask. built here, once, because
+        // every indexer layer shares it
+        if (cparams.fused_lid) {
+            inp->pool_bias_f16 = ggml_cast(ctx0,
+                    ggml_reshape_4d(ctx0, inp->pool_bias, n_pools, n_tps, 1, n_stream),
+                    GGML_TYPE_F16);
+            ggml_set_name(inp->pool_bias_f16, "kpool_pool_bias_f16");
+        }
+
+        // f16, not f32. The only two values either mask holds are 0.0f and
+        // -INFINITY, both exact in f16, so the narrower type is lossless and halves
+        // two [n_kv, n_tps, n_stream] inputs that live for the whole ubatch: 2 GiB
+        // each at n_ctx = 1 Mi, n_ubatch = 512.
+        //
+        // Every consumer takes f16. Under flash attention this is the KQ mask's own
+        // type, so build_attn_sparse adds the two with no conversion at all. With
+        // flash attention off - which GLM-5.3-Flash requires, so it is the path that
+        // matters here - the KQ mask is f32, and ggml_add gives its result src0's
+        // type: f16 + f32 -> f16 is a supported bin_bcast on CUDA and on the CPU,
+        // and ggml_soft_max_ext takes an f16 mask as readily as an f32 one
+        inp->sel_mask = ggml_new_tensor_4d(ctx0, GGML_TYPE_F16, n_kv, n_tps, 1, n_stream);
+        ggml_set_input(inp->sel_mask);
+        ggml_set_name(inp->sel_mask, "kpool_sel_mask");
+
+        inp->cand_mask = ggml_new_tensor_4d(ctx0, GGML_TYPE_F16, n_kv, n_tps, 1, n_stream);
+        ggml_set_input(inp->cand_mask);
+        ggml_set_name(inp->cand_mask, "kpool_cand_mask");
+    }
+
+    return (llm_graph_input_kpool *) res->add_input(std::move(inp));
+}
+
+ggml_tensor * llm_graph_context::build_attn_sparse(
+        llm_graph_input_attn_k * inp,
+        ggml_tensor * wo,
+        ggml_tensor * wo_b,
+        ggml_tensor * wo_s,
+        ggml_tensor * q_cur,
+        ggml_tensor * k_cur,
+        ggml_tensor * v_cur,
+        ggml_tensor * kq_b,
+        ggml_tensor * sinks,
+        ggml_tensor * v_mla,
+        ggml_tensor * top_k,
+        ggml_tensor * sel_mask,
+        ggml_tensor * cand_mask,
+            float     kq_scale,
+            int       il) const {
+    ggml_build_forward_expand(gf, q_cur);
+    ggml_build_forward_expand(gf, v_cur);
+    ggml_build_forward_expand(gf, k_cur);
+
+    const auto * mctx_cur = inp->mctx;
+
+    // store to KV cache
+    {
+        const auto & k_idxs = inp->get_k_idxs();
+
+        ggml_build_forward_expand(gf, mctx_cur->cpy_k(ctx0, k_cur, k_idxs, il));
+    }
+
+    const auto & kq_mask = inp->get_kq_mask();
+
+    GGML_ASSERT(sel_mask->type == GGML_TYPE_F16 || sel_mask->type == GGML_TYPE_F32);
+    GGML_ASSERT(sel_mask->type == cand_mask->type);
+    GGML_ASSERT(ggml_are_same_shape(sel_mask, cand_mask));
+    GGML_ASSERT(sel_mask->ne[0] == kq_mask->ne[0] && sel_mask->ne[1] == kq_mask->ne[1] &&
+                sel_mask->ne[3] == kq_mask->ne[3]);
+
+    // The dense DSA path (build_attn on llm_graph_input_attn_k_dsa) opens with
+    // ggml_fill(kq_mask, -INFINITY). Here the scatter starts from sel_mask
+    // instead, which already holds 0.0 on the query's own trailing incomplete
+    // pool: GLM always attends to that tail (index_kpool_always_select_tail), and
+    // keeping it out of the top-k budget is what lets the budget stay a whole
+    // number of pools.
+    //
+    // ggml_set_rows writes THROUGH to its destination and returns a view of it,
+    // and sel_mask is one shared per-ubatch input read by every indexer layer.
+    // Scattering into it directly makes each layer inherit the previous layer's
+    // unmasked cells: measured on TinySparse, layer 3 stayed inside its budget
+    // while layer 7, running second, reached 411 cells. The dense path never
+    // meets this because ggml_fill hands it a fresh tensor every layer. Take a
+    // private copy per layer.
+    ggml_tensor * mask_all = ggml_dup(ctx0, sel_mask);
+
+    // [n_kv, n_batch, 1, n_stream] -> [1, n_kv, n_batch, n_stream]
+    mask_all = ggml_view_4d(ctx0, mask_all, 1, mask_all->ne[0], mask_all->ne[1], mask_all->ne[3],
+            mask_all->nb[0], mask_all->nb[1], mask_all->nb[2], 0);
+
+    // [n_select, n_tps, n_stream] -> [n_select, n_tps, n_stream, 1]
+    ggml_tensor * top_k_3d = ggml_view_4d(ctx0, top_k, top_k->ne[0], top_k->ne[1], top_k->ne[2], 1,
+            top_k->nb[1], top_k->nb[2], top_k->ne[2]*top_k->nb[2], 0);
+
+    // A constant 0, never the cell's own bias. The scatter must not be able to
+    // ERASE a zero sel_mask already granted: a tail cell can also be named by the
+    // top-k (through an over-budget pool whose unfilled slots point at it), and
+    // scattering that cell's -inf score bias would leave the query attending to
+    // nothing at all. Rejecting an over-budget selection is done additively,
+    // below, by cand_mask.
+    //
+    // f32 whatever mask_all is: ggml_set_rows converts its values into the
+    // destination, and the CUDA backend only advertises SET_ROWS for f32 values
+    ggml_tensor * zeros = ggml_new_tensor_4d(ctx0, GGML_TYPE_F32, 1, top_k_3d->ne[0], top_k_3d->ne[1], top_k_3d->ne[2]);
+    zeros = ggml_fill(ctx0, zeros, 0.0f);
+
+    ggml_tensor * mask_top_k = ggml_set_rows(ctx0, mask_all, zeros, top_k_3d);
+
+    // [1, n_kv, n_batch, n_stream] -> [n_kv, n_batch, 1, n_stream]
+    mask_top_k = ggml_view_4d(ctx0, mask_top_k, mask_top_k->ne[1], mask_top_k->ne[2], 1, mask_top_k->ne[3],
+            mask_top_k->nb[2], mask_top_k->nb[3], mask_top_k->nb[3], 0);
+
+    // the reference's `selected_valid` gather, additively: a cell the top-k named
+    // that is not in the reference's candidate set goes back to -inf, and a tail
+    // cell that sel_mask granted stays at 0 because cand_mask is the UNION of the
+    // candidates and the tail
+    mask_top_k = ggml_add(ctx0, mask_top_k, cand_mask);
+
+    // ggml_add gives its result src0's type, so an f16 selection mask absorbs an
+    // f32 KQ mask and no cast is needed. The one direction that still needs one is
+    // an f32 mask meeting an f16 KQ mask: the add would yield f32 and
+    // ggml_flash_attn_ext asserts its mask is f16
+    if (mask_top_k->type == GGML_TYPE_F32 && kq_mask->type == GGML_TYPE_F16) {
+        mask_top_k = ggml_cast(ctx0, mask_top_k, GGML_TYPE_F16);
+    }
+
+    // and finally re-apply causality, occupancy and padding. load bearing: it is
+    // what keeps an empty, future or foreign-sequence cell masked no matter what
+    // the top-k returned
+    mask_top_k = ggml_add(ctx0, mask_top_k, kq_mask);
+    cb(mask_top_k, "kpool_kq_mask", il);
+
+    ggml_tensor * q = q_cur;
+    ggml_tensor * k = mctx_cur->get_k(ctx0, il);
+    ggml_tensor * v = ggml_view_4d(ctx0, k, v_cur->ne[0], k->ne[1], k->ne[2], k->ne[3], k->nb[1], k->nb[2], k->nb[3], 0);
+
+    if (k->type == GGML_TYPE_TURBO3_0 || k->type == GGML_TYPE_TURBO4_0 || k->type == GGML_TYPE_TURBO2_0) {
+        if (q->ne[0] % 128 != 0) {
+            const int64_t pad = ((q->ne[0] + 127) / 128) * 128 - q->ne[0];
+            q = ggml_pad(ctx0, q, pad, 0, 0, 0);
+        }
+        if (!ggml_is_contiguous(q)) { q = ggml_cont(ctx0, q); }
+        ggml_tensor * innerq_scale = mctx_cur->get_turbo_innerq_scale_inv();
+        q = ggml_turbo_wht(ctx0, q, 0, 0, innerq_scale);
+    }
+
+    ggml_tensor * cur = build_attn_mha(q, k, v, kq_b, mask_top_k, sinks, v_mla, kq_scale, il);
+    cb(cur, "kqv_out", il);
+
+    if (wo) {
+        cur = build_lora_mm(wo, cur, wo_s);
+    }
+
+    if (wo_b) {
+        cur = ggml_add(ctx0, cur, wo_b);
+    }
+
+    return cur;
+}
+
 llm_graph_input_mem_hybrid_iswa * llm_graph_context::build_inp_mem_hybrid_iswa() const {
     const auto * mctx_cur = static_cast<const llama_memory_hybrid_iswa_context *>(mctx);
 
@@ -3840,77 +4121,102 @@ void llm_graph_context::build_sampling() const {
     auto inp_sampling = std::make_unique<llm_graph_input_sampling>(samplers);
     res->add_input(std::move(inp_sampling));
 
-    std::map<llama_seq_id, int32_t> seq_to_logit_row;
-    int32_t logit_row_idx = 0;
-
-    for (uint32_t i = 0; i < ubatch.n_tokens; i++) {
+    std::map<llama_seq_id, std::vector<uint32_t>> sampling_rows;
+    uint32_t n_rows = 0;
+    for (uint32_t i = 0; i < ubatch.n_tokens; ++i) {
         if (ubatch.output[i]) {
-            llama_seq_id seq_id = ubatch.seq_id[i][0];
-            seq_to_logit_row[seq_id] = logit_row_idx;
-            logit_row_idx++;
+            sampling_rows[ubatch.seq_id[i][0]].push_back(n_rows++);
         }
     }
+
+    res->t_sampled.resize(n_rows, nullptr);
+    res->t_sampled_probs.resize(n_rows, nullptr);
+    res->t_sampled_logits.resize(n_rows, nullptr);
+    res->t_candidates.resize(n_rows, nullptr);
 
     // res->t_logits will contain logits for all tokens that want the logits calculated (logits=1 or output=1)
     GGML_ASSERT(res->t_logits != nullptr && "missing t_logits tensor");
 
-    // add a dummy row of logits
-    // this trick makes the graph static, regardless of which samplers are activated
-    // this is important in order to minimize graph reallocations
+    // add a dummy row to keep the single-output graph static regardless of active samplers
+    // multi-output graphs can still vary with the number of output rows
     ggml_tensor * logits_t = ggml_pad(ctx0, res->t_logits, 0, 1, 0, 0);
 
-    for (const auto & [seq_id, sampler] : samplers) {
-        const auto it = seq_to_logit_row.find(seq_id);
-
-        // inactive samplers always work on the first row
-        const auto row_idx = it != seq_to_logit_row.end() ? it->second : 0;
-        const int i_out    = it != seq_to_logit_row.end() ? 1          : 0;
-
-        ggml_tensor * logits_seq = ggml_view_1d(ctx0, logits_t, logits_t->ne[0], row_idx * logits_t->nb[1]);
-        ggml_format_name(logits_seq, "logits_seq_%d", seq_id);
-
-        struct llama_sampler_data data = {
-            /*.logits      =*/ logits_seq,
-            /*.probs       =*/ nullptr,
-            /*.sampled     =*/ nullptr,
-            /*.candidates  =*/ nullptr,
-        };
-
-        assert(sampler->iface->backend_apply);
-        sampler->iface->backend_apply(sampler, ctx0, gf, &data);
-
-        if (data.sampled != nullptr) {
-            res->t_sampled[seq_id] = data.sampled;
-            outs[1] = data.sampled;
-            ggml_build_forward_select(gf, outs.data(), outs.size(), i_out);
-        }
-
-        if (data.probs != nullptr) {
-            res->t_sampled_probs[seq_id] = data.probs;
-            outs[1] = data.probs;
-            ggml_build_forward_select(gf, outs.data(), outs.size(), i_out);
-        }
-
-        if (data.logits != nullptr) {
-            res->t_sampled_logits[seq_id] = data.logits;
-            outs[1] = data.logits;
-            ggml_build_forward_select(gf, outs.data(), outs.size(), i_out);
-        }
-
-        if (data.candidates != nullptr) {
-            res->t_candidates[seq_id] = data.candidates;
-            outs[1] = data.candidates;
-            ggml_build_forward_select(gf, outs.data(), outs.size(), i_out);
+    for (const auto & entry : samplers) {
+        if (entry.second->iface->backend_reset) {
+            entry.second->iface->backend_reset(entry.second);
         }
     }
 
-    // TODO: Call llama_sampler_accept_ggml after all samplers have been applied.
+    static const std::vector<uint32_t> dummy_row = { 0 };
+
+    for (const auto & [seq_id, sampler] : samplers) {
+        const auto it = sampling_rows.find(seq_id);
+
+        // inactive samplers always work on the first row
+        const bool active = it != sampling_rows.end();
+        const auto & rows = active ? it->second : dummy_row;
+        const int i_out   = active ? 1          : 0;
+
+        for (uint32_t i = 0; i < rows.size(); ++i) {
+            ggml_tensor * logits_seq = ggml_view_1d(ctx0, logits_t, logits_t->ne[0], rows[i] * logits_t->nb[1]);
+            ggml_format_name(logits_seq, "logits_seq_%d_%u", seq_id, i);
+
+            struct llama_sampler_data data = {
+                /*.logits       =*/ logits_seq,
+                /*.probs        =*/ nullptr,
+                /*.sampled      =*/ nullptr,
+                /*.candidates   =*/ nullptr,
+            };
+
+            assert(sampler->iface->backend_apply);
+            sampler->iface->backend_apply(sampler, ctx0, gf, &data);
+
+            if (data.sampled != nullptr) {
+                if (active) {
+                    res->t_sampled[rows[i]] = data.sampled;
+                }
+                outs[1] = data.sampled;
+                ggml_build_forward_select(gf, outs.data(), outs.size(), i_out);
+            }
+
+            if (data.probs != nullptr) {
+                if (active) {
+                    res->t_sampled_probs[rows[i]] = data.probs;
+                }
+                outs[1] = data.probs;
+                ggml_build_forward_select(gf, outs.data(), outs.size(), i_out);
+            }
+
+            if (data.logits != nullptr) {
+                if (active) {
+                    res->t_sampled_logits[rows[i]] = data.logits;
+                }
+                outs[1] = data.logits;
+                ggml_build_forward_select(gf, outs.data(), outs.size(), i_out);
+            }
+
+            if (data.candidates != nullptr) {
+                if (active) {
+                    res->t_candidates[rows[i]] = data.candidates;
+                }
+                outs[1] = data.candidates;
+                ggml_build_forward_select(gf, outs.data(), outs.size(), i_out);
+            }
+        }
+    }
+
+    // TODO: Call backend_accept after all samplers have been applied.
     /*
     for (const auto & [seq_id, sampler] : samplers) {
-        if (auto it = res->t_sampled.find(seq_id); it != res->t_sampled.end()) {
-            ggml_tensor * selected_token = it->second;
-            if (selected_token != nullptr) {
-                llama_sampler_accept_ggml(sampler, ctx0, gf, selected_token);
+        const auto it = sampling_rows.find(seq_id);
+        if (it == sampling_rows.end()) {
+            continue;
+        }
+
+        for (uint32_t row : it->second) {
+            ggml_tensor * selected_token = res->t_sampled[row];
+            if (selected_token != nullptr && sampler->iface->backend_accept) {
+                sampler->iface->backend_accept(sampler, ctx0, gf, selected_token);
             }
         }
     }

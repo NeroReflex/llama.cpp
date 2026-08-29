@@ -350,6 +350,47 @@ static bool tensor_allows_quantization(const llama_model_quantize_params * param
     // do not quantize relative position bias (T5)
     quantize &= name.find("attn_rel_b.weight") == std::string::npos;
 
+    // glm5next: small, precision-sensitive tensors that must stay at source
+    // precision -- the mHC residual mixers, the lightning indexer (selection gate,
+    // learned k-pool position table, and the three indexer projections) and the KDA
+    // recurrence gates. ~1 GiB total on GLM-5.3-Flash, so the size cost is noise
+    // against a 100-240 GB quant, while quantizing them perturbs *which* pools the
+    // indexer selects and *how much* state each KDA step retains -- errors that
+    // compound over a sequence instead of averaging out.
+    //
+    // Note both spellings are required. The compressor tensors came in with the
+    // DeepSeek-V4 merge and are named with an UNDERSCORE (indexer_compressor_ape /
+    // _gate), while the projections use a DOT (indexer.proj / .attn_k / .attn_q_b).
+    // A single "indexer." prefix test silently misses the compressor pair.
+    //
+    // Deliberately NOT listed: attn_q_a / attn_kv_a_mqa / attn_k_b / attn_v_b. They
+    // are precision-sensitive too, but our release recipe pins them to q8_0 via
+    // --tensor-type, and that is the configuration the shipped quants were measured
+    // in (KLD 0.027 at Q5_K_XL). Forcing them full precision here would change quant
+    // sizes and invalidate those measurements.
+    //
+    // indexer.k_norm.weight needs no entry -- the generic "_norm.weight" rule above
+    // already excludes it.
+    if (arch == LLM_ARCH_GLM5NEXT) {
+        static const char * const glm5next_full_precision[] = {
+            "hc_attn_fn",
+            "hc_ffn_fn",
+            "indexer_compressor_ape",
+            "indexer_compressor_gate",
+            "indexer.proj",
+            "indexer.attn_k",
+            "indexer.attn_q_b",
+            "ssm_f_a",
+            "ssm_f_b",
+            "ssm_g_a",
+            "ssm_g_b",
+            "ssm_beta",
+        };
+        for (const char * pin : glm5next_full_precision) {
+            quantize &= name.find(pin) == std::string::npos;
+        }
+    }
+
     // do not quantize specific multimodal tensors
     quantize &= name.find(".position_embd") == std::string::npos;
     quantize &= name.find("sam.pos_embd")   == std::string::npos;
@@ -493,7 +534,12 @@ static ggml_type llama_tensor_get_type_impl(quantize_state_impl & qs, ggml_type 
     } else if (ftype == LLAMA_FTYPE_MOSTLY_MXFP4_MOE) {
         // MoE   tensors -> MXFP4
         // other tensors -> Q8_0
-        if (tensor->ne[2] > 1) {
+        // MLA projection tensors are also 3D, so match expert tensor roles explicitly.
+        const bool has_3d_mla = arch == LLM_ARCH_BAILINGMOE3 || arch == LLM_ARCH_GLM5NEXT;
+        const bool is_expert  = category == tensor_category::FFN_UP ||
+                                category == tensor_category::FFN_GATE ||
+                                category == tensor_category::FFN_DOWN;
+        if (tensor->ne[2] > 1 && (!has_3d_mla || is_expert)) {
             new_type = GGML_TYPE_MXFP4;
         } else {
             new_type = GGML_TYPE_Q8_0;
@@ -1299,7 +1345,7 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
             total_size_org += tensor_size;
             total_size_new += new_size;
 
-            // update the gguf meta data as we go
+            // update the gguf metadata as we go
             gguf_set_tensor_type(ctx_outs[cur_split].get(), metadata[i].name.c_str(), new_type);
             GGML_ASSERT(gguf_get_tensor_size(ctx_outs[cur_split].get(), gguf_find_tensor(ctx_outs[cur_split].get(), metadata[i].name.c_str())) == new_size);
             gguf_set_tensor_data(ctx_outs[cur_split].get(), metadata[i].name.c_str(), new_data);
@@ -1307,6 +1353,10 @@ static void llama_model_quantize_impl(const std::string & fname_inp, const std::
             // write tensor data + padding
             fout.write((const char *) new_data, new_size);
             zeros(fout, GGML_PAD(new_size, align) - new_size);
+
+            // unmap the tensor to free memory
+            if (ml.use_mmap) { ml.unmap_weight(weight); }
+
         } // no --dry-run
     } // main loop
 

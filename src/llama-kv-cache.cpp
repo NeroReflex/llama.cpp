@@ -582,12 +582,13 @@ llama_kv_cache::llama_kv_cache(
                 hparams.n_embd_head_v() % 64 == 0;
         }
 
-        // always create Hadamard rotation tensors for DeepSeek V3.2 DSA lightning
+        // always create Hadamard rotation tensors for DeepSeek / GLM DSA lightning
         // indexer: this is a functional requirement for the model, not optional
         // tuning, so it overrides the default-off policy (still respects the hard
         // LLAMA_ATTN_ROT_DISABLE lock-out).
-        if (!attn_rot_disable && (model.arch == LLM_ARCH_DEEPSEEK32 || model.arch == LLM_ARCH_DEEPSEEK4) &&
-            hparams.n_embd_head_k_full == hparams.indexer_head_size) {
+        if (!attn_rot_disable && (model.arch == LLM_ARCH_DEEPSEEK32 || model.arch == LLM_ARCH_DEEPSEEK4 ||
+                model.arch == LLM_ARCH_GLM_DSA || model.arch == LLM_ARCH_DOTS3NOTE) &&
+                hparams.n_embd_head_k_full == hparams.indexer_head_size) {
             attn_rot_k = true;
         }
     }
@@ -653,6 +654,7 @@ bool llama_kv_cache::seq_rm(llama_seq_id seq_id, llama_pos p0, llama_pos p1) {
         return true;
     }
 
+    // TODO: fix incosistent handling of `seq_id < 0` and `seq_id == -1` in the codebase [TAG_LLAMA_SEQ_ID_NEG]
     GGML_ASSERT(seq_id == -1 || (seq_id >= 0 && (size_t) seq_id < seq_to_stream.size()));
 
     if (p0 < 0) {
@@ -2268,6 +2270,10 @@ ggml_cgraph * llama_kv_cache::build_graph_shift(llm_graph_result * res, llama_co
     for (const auto & layer : layers) {
         const uint32_t il = layer.il;
 
+        if (!hparams.has_rope(il)) {
+            continue;
+        }
+
         const int64_t n_head_kv    = hparams.n_head_kv(il);
         const int64_t n_embd_k_gqa = hparams.n_embd_k_gqa(il);
 
@@ -2375,6 +2381,7 @@ void llama_kv_cache::state_read(llama_io_read_i & io, llama_seq_id seq_id, llama
 
     GGML_UNUSED(flags);
 
+    // TODO: fix incosistent handling of `seq_id < 0` and `seq_id == -1` in the codebase [TAG_LLAMA_SEQ_ID_NEG]
     GGML_ASSERT(seq_id == -1 || (seq_id >= 0 && (size_t) seq_id < seq_to_stream.size()));
 
     uint32_t n_stream_cur;
@@ -2923,6 +2930,14 @@ const llama_ubatch & llama_kv_cache_context::get_ubatch() const {
 
 uint32_t llama_kv_cache_context::get_n_kv() const {
     return n_kv;
+}
+
+uint32_t llama_kv_cache_context::get_n_stream() const {
+    return sinfos[i_cur].s1 - sinfos[i_cur].s0 + 1;
+}
+
+const llama_kv_cache * llama_kv_cache_context::get_kv() const {
+    return kv;
 }
 
 ggml_type llama_kv_cache_context::type_k() const {

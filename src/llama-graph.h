@@ -23,6 +23,7 @@ struct llama_memory_context_i;
 
 class llama_kv_cache_context;
 class llama_kv_cache_dsa_context;
+class llama_kv_cache_dsa_iswa_context;
 class llama_kv_cache_msa_context;
 class llama_kv_cache_dsv4_raw_context;
 class llama_kv_cache_dsv4_context;
@@ -31,6 +32,10 @@ class llama_kv_cache_iswa_context;
 class llama_memory_recurrent_context;
 class llama_memory_hybrid_context;
 class llama_memory_hybrid_iswa_context;
+
+// defined in llama-kv-cache-kpool.h, which includes this header, so it can only
+// be forward declared here
+class llm_graph_input_kpool;
 
 // certain models (typically multi-modal) can produce different types of graphs
 enum llm_graph_type {
@@ -61,6 +66,7 @@ enum llm_ffn_op_type : int {
     LLM_FFN_GEGLU,
     LLM_FFN_REGLU,
     LLM_FFN_SWIGLU_OAI_MOE,
+    LLM_FFN_SITU,           // kimi-k3
 };
 
 enum llm_ffn_gate_type {
@@ -375,6 +381,9 @@ public:
 
     bool can_reuse(const llm_graph_params & params) override;
 
+    // like can_reuse, but does not re-bind mctx
+    bool can_reuse_impl(const llm_graph_params & params);
+
     ggml_tensor * get_k_idxs() const { return self_k_idxs; }
 
     ggml_tensor * get_kq_mask() const { return self_kq_mask_cnv; }
@@ -406,6 +415,9 @@ public:
 
     bool can_reuse(const llm_graph_params & params) override;
 
+    // like can_reuse, but does not re-bind mctx
+    bool can_reuse_impl(const llm_graph_params & params);
+
     ggml_tensor * get_k_idxs_mla() const { return self_k_idxs_mla; }
     ggml_tensor * get_k_idxs_lid() const { return self_k_idxs_lid; }
 
@@ -426,6 +438,32 @@ public:
     const llama_cparams cparams;
 
     const llama_kv_cache_dsa_context * mctx;
+};
+
+// DSA input (full-attention layers + indexer) with K-only input for the SWA layers
+class llm_graph_input_attn_k_dsa_iswa : public llm_graph_input_i {
+public:
+    llm_graph_input_attn_k_dsa_iswa(
+            std::unique_ptr<llm_graph_input_attn_k_dsa> inp_dsa,
+            std::unique_ptr<llm_graph_input_attn_k>     inp_swa,
+            const llama_kv_cache_dsa_iswa_context *     mctx) :
+        inp_dsa(std::move(inp_dsa)),
+        inp_swa(std::move(inp_swa)),
+        mctx(mctx) {
+    }
+    ~llm_graph_input_attn_k_dsa_iswa() = default;
+
+    void set_input(const llama_ubatch * ubatch) override;
+
+    bool can_reuse(const llm_graph_params & params) override;
+
+    llm_graph_input_attn_k_dsa * get_dsa() const { return inp_dsa.get(); }
+    llm_graph_input_attn_k     * get_swa() const { return inp_swa.get(); }
+
+    std::unique_ptr<llm_graph_input_attn_k_dsa> inp_dsa;
+    std::unique_ptr<llm_graph_input_attn_k>     inp_swa;
+
+    const llama_kv_cache_dsa_iswa_context * mctx;
 };
 
 // standard K/V attention input against the base cache, plus destination indices for the indexer key cache
@@ -901,11 +939,11 @@ public:
 
     std::vector<ggml_tensor *> t_layer_inp;
 
-    std::map<llama_seq_id, ggml_tensor *> t_sampled_logits;
-    std::map<llama_seq_id, ggml_tensor *> t_candidates;
-    std::map<llama_seq_id, ggml_tensor *> t_sampled;
+    std::vector<ggml_tensor *> t_sampled;
+    std::vector<ggml_tensor *> t_sampled_probs;
+    std::vector<ggml_tensor *> t_sampled_logits;
+    std::vector<ggml_tensor *> t_candidates;
     std::vector<llm_graph_fused_node> fused_nodes;
-    std::map<llama_seq_id, ggml_tensor *> t_sampled_probs;
 
     std::vector<llm_graph_input_ptr> inputs;
 
@@ -1186,6 +1224,8 @@ struct llm_graph_context {
 
     llm_graph_input_attn_k_dsa * build_attn_inp_k_dsa() const;
 
+    llm_graph_input_attn_k_dsa_iswa * build_attn_inp_k_dsa_iswa() const;
+
     llm_graph_input_attn_kv_msa * build_attn_inp_kv_msa(bool msa_enabled) const;
 
     ggml_tensor * build_attn(
@@ -1304,6 +1344,53 @@ struct llm_graph_context {
     llm_graph_input_mem_hybrid_k * build_inp_mem_hybrid_k() const;
 
     llm_graph_input_mem_hybrid_iswa * build_inp_mem_hybrid_iswa() const;
+
+    //
+    // pooled (GLM-5-Next lightning) indexer
+    //
+
+    // one pooling map per ubatch, shared by every indexer layer. see
+    // llama-kv-cache-kpool.h for what the tensors mean and why they are built
+    // host side rather than derived in the graph.
+    //
+    // `scoring` false allocates only k_idxs: the indexer key and gate store is
+    // unconditional, the selection is not. An input tensor with no consumer is
+    // never backed by the allocator, so the rest must not be created either
+    llm_graph_input_kpool * build_inp_kpool(
+            const llama_memory_hybrid_context * mctx_cur,
+            ggml_tensor * kq_mask,
+            bool scoring) const;
+
+    // sparse (pooled top-k) variant of the llm_graph_input_attn_k build_attn.
+    //
+    // Identical to it except for the mask. `top_k` names the cells the pooled
+    // indexer selected, already expanded from whole pools; they are unmasked on
+    // top of `sel_mask`, which arrives already holding 0.0f on the query's own
+    // always-selected trailing pool. `cand_mask` is the reference's candidate
+    // set and is what makes an over-budget selection harmless: ggml_top_k
+    // returns a full budget of pool ordinals even when fewer pools carry a
+    // finite score, which during prefill is the normal state.
+    //
+    // Both masks may be f16 or f32, and build_inp_kpool allocates f16: the only
+    // values either holds are 0.0f and -INFINITY, both exact in f16. The combined
+    // mask inherits their type, which the KQ mask then adds into whatever its own
+    // type is
+    ggml_tensor * build_attn_sparse(
+            llm_graph_input_attn_k * inp,
+            ggml_tensor * wo,
+            ggml_tensor * wo_b,
+            ggml_tensor * wo_s,
+            ggml_tensor * q_cur,     // [n_embd_head_q, n_head_q, n_tokens]
+            ggml_tensor * k_cur,     // [n_embd_head_k, n_head_k, n_tokens]
+            ggml_tensor * v_cur,     // [n_embd_head_v, n_head_v, n_tokens]
+            ggml_tensor * kq_b,
+            ggml_tensor * sinks,     // [n_head_q]
+            ggml_tensor * v_mla,     // [n_embd_head_v_mla, n_embd_head_v, n_head_v]
+            ggml_tensor * top_k,     // I32 [n_select, n_tokens/n_stream, n_stream]
+            ggml_tensor * sel_mask,  // F16/F32 [n_kv, n_batch, 1, n_stream]
+            ggml_tensor * cand_mask, // F16/F32 [n_kv, n_batch, 1, n_stream]
+                  float   kq_scale,
+                    int   il) const;
 
     //
     // pooling
