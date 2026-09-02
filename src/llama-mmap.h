@@ -54,12 +54,16 @@ struct llama_mmap {
     void * addr() const;
 
     void unmap_fragment(size_t first, size_t last);
+    size_t register_host(size_t first, size_t last, bool (*reg_fn)(void *, size_t), void (*unreg_fn)(void *));
 
     static const bool SUPPORTED;
 
 private:
     struct impl;
     std::unique_ptr<impl> pimpl;
+
+    void * host_reg_addr = nullptr;
+    void (*host_unreg_fn)(void *) = nullptr;
 };
 
 struct llama_mlock {
