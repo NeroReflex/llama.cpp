@@ -4,3 +4,7 @@ export enum ModelModality {
 	VISION = 'VISION',
 	VIDEO = 'VIDEO'
 }
+
+export enum ModelCapability {
+	REASONING = 'REASONING'
+}
