@@ -9815,6 +9815,19 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         }
     }
 
+    // Ternary formats at real Bonsai weight shapes. The k values are the model's actual row
+    // lengths and the odd m values land a partial row group; n sweeps 1..8 so the multi-column
+    // mmvq dispatchers run, which the 16 x 256 cases above never reach.
+    for (ggml_type type_a : {GGML_TYPE_PTQ1_0, GGML_TYPE_PQ2_0}) {
+        for (int64_t k : {1024, 5120, 6144, 17408}) {
+            for (int64_t m : {67, 70}) {
+                for (int64_t n = 1; n <= 8; ++n) {
+                    test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, m, n, k, {1, 1}, {1, 1}));
+                }
+            }
+        }
+    }
+
     // TQ4_1S: large-batch MUL_MAT exercises the dequant + f16 matmul path used
     // during prompt processing (n > mul_mat_vec_max_cols = 8 forces this path).
     // The fused mul_mat_vec kernel is NOT used for these cases; instead the weights
