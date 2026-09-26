@@ -176,7 +176,16 @@ static __global__ void concat_dim0_transpose_u32(
 
 template <typename T>
 static void concat_cuda(const ggml_tensor * src0, const ggml_tensor * src1, ggml_tensor * dst, int dim, cudaStream_t stream) {
-    if (dim != 3 && ggml_is_contiguous_to_3(src0) && ggml_is_contiguous_to_3(src1)) {
+    if (ggml_is_contiguous(src0) && ggml_is_contiguous(src1) &&
+            (dim == 3 || (dim == 2 && dst->ne[3] == 1) || (dim == 1 && dst->ne[2] * dst->ne[3] == 1))) {
+        // [ik_llama.cpp PR #237 port] contiguous concat along the outermost non-unit dim is
+        // just src0 bytes followed by src1 bytes
+        const size_t size0 = ggml_nbytes(src0);
+        const size_t size1 = ggml_nbytes(src1);
+
+        CUDA_CHECK(cudaMemcpyAsync((char *) dst->data,         src0->data, size0, cudaMemcpyDeviceToDevice, stream));
+        CUDA_CHECK(cudaMemcpyAsync((char *) dst->data + size0, src1->data, size1, cudaMemcpyDeviceToDevice, stream));
+    } else if (dim != 3 && ggml_is_contiguous_to_3(src0) && ggml_is_contiguous_to_3(src1)) {
         const T * src0_d = (const T *) src0->data;
         const T * src1_d = (const T *) src1->data;
         T *       dst_d  = (T *) dst->data;
@@ -189,12 +198,6 @@ static void concat_cuda(const ggml_tensor * src0, const ggml_tensor * src1, ggml
                     ggml_row_size(src0->type, src0->ne[0])/sizeof(T), src0->ne[1], src0->ne[2],
                     ggml_row_size(dst->type, dst->ne[0])/sizeof(T),  dst->ne[1],  dst->ne[2], dim, stream);
         }
-    } else if (dim == 3 && ggml_is_contiguous(src0) && ggml_is_contiguous(src1)) {
-        const size_t size0 = ggml_nbytes(src0);
-        const size_t size1 = ggml_nbytes(src1);
-
-        CUDA_CHECK(cudaMemcpyAsync((char *) dst->data,         src0->data, size0, cudaMemcpyDeviceToDevice, stream));
-        CUDA_CHECK(cudaMemcpyAsync((char *) dst->data + size0, src1->data, size1, cudaMemcpyDeviceToDevice, stream));
     } else {
         GGML_ASSERT(!ggml_is_quantized(src0->type));
 

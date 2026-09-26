@@ -1775,6 +1775,15 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
                            }
                        }).set_env("LLAMA_ARG_FLASH_ATTN"));
     add_opt(common_arg(
+        {"-amb", "--attn-max-batch"}, "N",
+        string_format("cap the non-Flash-Attention K*Q tensor at N MiB by splitting the attention "
+                      "over head chunks (0 = unlimited, default: %d); spares compute-buffer memory "
+                      "at long context (from ik_llama.cpp PR #237)", params.attn_max_batch),
+        [](common_params & params, int value) {
+            params.attn_max_batch = value;
+        }
+    ).set_env("LLAMA_ARG_ATTN_MAX_BATCH"));
+    add_opt(common_arg(
         {"-p", "--prompt"}, "PROMPT",
         "prompt to start generation with; for system message, use -sys",
         [](common_params & params, const std::string & value) {

@@ -42,6 +42,7 @@ struct llama_cparams {
     bool causal_attn;
     bool offload_kqv;
     bool flash_attn;
+    int32_t attn_max_batch;  // MiB cap for the non-FA K*Q tensor; 0 = unlimited (port of ik_llama.cpp -amb)
     bool auto_fa;
     bool fused_lid;          // use fused lightning indexer
     bool auto_flid;

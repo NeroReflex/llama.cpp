@@ -2730,51 +2730,143 @@ ggml_tensor * llm_graph_context::build_attn_mha(
 
         cur = ggml_reshape_2d(ctx0, cur, cur->ne[0]*cur->ne[1], cur->ne[2]*cur->ne[3]);
     } else {
-        ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
-        cb(kq, "kq", il);
-
-        // note: this op tends to require high floating point range
-        //       while for some models F16 is enough, for others it is not, so we default to F32 here
-        ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
-
-        if (arch == LLM_ARCH_GROK) {
-            // need to do the following:
-            // multiply by attn_output_multiplier
-            // and then :
-            // kq = 30 * tanh(kq / 30)
-            // before the softmax below
-
-            kq = ggml_tanh(ctx0, ggml_scale(ctx0, kq, hparams.f_attn_out_scale / hparams.f_attn_logit_softcapping));
-            cb(kq, "kq_tanh", il);
-            kq = ggml_scale(ctx0, kq, hparams.f_attn_logit_softcapping);
-            cb(kq, "kq_scaled", il);
-        }
-
-        if (hparams.attn_soft_cap) {
-            kq = ggml_scale(ctx0, kq, 1.0f / hparams.f_attn_logit_softcapping);
-            cb(kq, "kq_scaled_1", il);
-            kq = ggml_tanh (ctx0, kq);
-            cb(kq, "kq_tanh", il);
-            kq = ggml_scale(ctx0, kq, hparams.f_attn_logit_softcapping);
-            cb(kq, "kq_scaled_2", il);
-        }
-
-        if (kq_b) {
-            kq = ggml_add(ctx0, kq, kq_b);
-            cb(kq, "kq_plus_kq_b", il);
-        }
-
-        kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, hparams.f_max_alibi_bias);
-        ggml_soft_max_add_sinks(kq, sinks);
-        cb(kq, "kq_soft_max", il);
-
         if (!v_trans) {
             // note: avoid this branch
             v = ggml_cont(ctx0, ggml_transpose(ctx0, v));
             cb(v, "v_cont", il);
         }
 
-        ggml_tensor * kqv = ggml_mul_mat(ctx0, v, kq);
+        // [ik_llama.cpp PR #237 port] cap the K*Q tensor at cparams.attn_max_batch MiB by
+        // splitting the attention over head chunks and concatenating the partial results.
+        // Softmax runs per head and the chunk boundaries respect the contiguous q-head ->
+        // kv-head mapping of ggml_mul_mat, so the result matches the unsplit computation.
+        // Plain attention only: fall back to the single-shot path with KQ bias or sinks,
+        // or when the GQA ratios do not divide the head count evenly.
+        const int64_t n_head   = q->ne[2];
+        const int64_t n_stream = q->ne[3];
+
+        const auto gcd_i64 = [](int64_t a, int64_t b) {
+            while (b != 0) {
+                const int64_t t = a % b;
+                a = b;
+                b = t;
+            }
+            return a;
+        };
+
+        bool     split_attn      = false;
+        int64_t  heads_per_chunk = n_head;
+
+        if (cparams.attn_max_batch > 0 && kq_b == nullptr && sinks == nullptr &&
+                n_head % k->ne[2] == 0 && n_head % v->ne[2] == 0) {
+            const double kq_size_mib =
+                (double) k->ne[1] * q->ne[1] * n_head * n_stream * sizeof(float) / (1024.0 * 1024.0);
+
+            if (kq_size_mib > cparams.attn_max_batch) {
+                // chunk sizes must be a multiple of both GQA ratios so each chunk maps to
+                // contiguous kv-head ranges in k and v
+                const int64_t g_k  = n_head / k->ne[2];
+                const int64_t g_v  = n_head / v->ne[2];
+                const int64_t step = g_k / gcd_i64(g_k, g_v) * g_v;
+
+                const int64_t n_chunk = (int64_t) ((kq_size_mib + cparams.attn_max_batch - 1) / cparams.attn_max_batch);
+                heads_per_chunk = ((n_head + n_chunk - 1) / n_chunk + step - 1) / step * step;
+                heads_per_chunk = std::max(heads_per_chunk, step);
+                split_attn      = heads_per_chunk < n_head;
+            }
+        }
+
+        ggml_tensor * kqv;
+
+        if (!split_attn) {
+            ggml_tensor * kq = ggml_mul_mat(ctx0, k, q);
+            cb(kq, "kq", il);
+
+            // note: this op tends to require high floating point range
+            //       while for some models F16 is enough, for others it is not, so we default to F32 here
+            ggml_mul_mat_set_prec(kq, GGML_PREC_F32);
+
+            if (arch == LLM_ARCH_GROK) {
+                // need to do the following:
+                // multiply by attn_output_multiplier
+                // and then :
+                // kq = 30 * tanh(kq / 30)
+                // before the softmax below
+
+                kq = ggml_tanh(ctx0, ggml_scale(ctx0, kq, hparams.f_attn_out_scale / hparams.f_attn_logit_softcapping));
+                cb(kq, "kq_tanh", il);
+                kq = ggml_scale(ctx0, kq, hparams.f_attn_logit_softcapping);
+                cb(kq, "kq_scaled", il);
+            }
+
+            if (hparams.attn_soft_cap) {
+                kq = ggml_scale(ctx0, kq, 1.0f / hparams.f_attn_logit_softcapping);
+                cb(kq, "kq_scaled_1", il);
+                kq = ggml_tanh (ctx0, kq);
+                cb(kq, "kq_tanh", il);
+                kq = ggml_scale(ctx0, kq, hparams.f_attn_logit_softcapping);
+                cb(kq, "kq_scaled_2", il);
+            }
+
+            if (kq_b) {
+                kq = ggml_add(ctx0, kq, kq_b);
+                cb(kq, "kq_plus_kq_b", il);
+            }
+
+            kq = ggml_soft_max_ext(ctx0, kq, kq_mask, kq_scale, hparams.f_max_alibi_bias);
+            ggml_soft_max_add_sinks(kq, sinks);
+            cb(kq, "kq_soft_max", il);
+
+            kqv = ggml_mul_mat(ctx0, v, kq);
+        } else {
+            const int64_t g_k = n_head / k->ne[2];
+            const int64_t g_v = n_head / v->ne[2];
+
+            for (int64_t h0 = 0; h0 < n_head; h0 += heads_per_chunk) {
+                const int64_t nh = std::min(heads_per_chunk, n_head - h0);
+
+                ggml_tensor * q_i = ggml_view_4d(ctx0, q,
+                        q->ne[0], q->ne[1], nh, n_stream, q->nb[1], q->nb[2], q->nb[3], q->nb[2] * h0);
+
+                ggml_tensor * k_i = ggml_view_4d(ctx0, k,
+                        k->ne[0], k->ne[1], nh / g_k, n_stream, k->nb[1], k->nb[2], k->nb[3], k->nb[2] * (h0 / g_k));
+
+                ggml_tensor * v_i = ggml_view_4d(ctx0, v,
+                        v->ne[0], v->ne[1], nh / g_v, n_stream, v->nb[1], v->nb[2], v->nb[3], v->nb[2] * (h0 / g_v));
+
+                ggml_tensor * kq_i = ggml_mul_mat(ctx0, k_i, q_i);
+                cb(kq_i, "kq", il);
+
+                // note: this op tends to require high floating point range
+                //       while for some models F16 is enough, for others it is not, so we default to F32 here
+                ggml_mul_mat_set_prec(kq_i, GGML_PREC_F32);
+
+                if (arch == LLM_ARCH_GROK) {
+                    kq_i = ggml_tanh(ctx0, ggml_scale(ctx0, kq_i, hparams.f_attn_out_scale / hparams.f_attn_logit_softcapping));
+                    cb(kq_i, "kq_tanh", il);
+                    kq_i = ggml_scale(ctx0, kq_i, hparams.f_attn_logit_softcapping);
+                    cb(kq_i, "kq_scaled", il);
+                }
+
+                if (hparams.attn_soft_cap) {
+                    kq_i = ggml_scale(ctx0, kq_i, 1.0f / hparams.f_attn_logit_softcapping);
+                    cb(kq_i, "kq_scaled_1", il);
+                    kq_i = ggml_tanh (ctx0, kq_i);
+                    cb(kq_i, "kq_tanh", il);
+                    kq_i = ggml_scale(ctx0, kq_i, hparams.f_attn_logit_softcapping);
+                    cb(kq_i, "kq_scaled_2", il);
+                }
+
+                kq_i = ggml_soft_max_ext(ctx0, kq_i, kq_mask, kq_scale, hparams.f_max_alibi_bias);
+                cb(kq_i, "kq_soft_max", il);
+
+                ggml_tensor * kqv_i = ggml_mul_mat(ctx0, v_i, kq_i);
+
+                kqv = (h0 == 0) ? kqv_i : ggml_concat(ctx0, kqv, kqv_i, 2);
+                ggml_build_forward_expand(gf, kqv);
+            }
+        }
+
         cb(kqv, "kqv", il);
 
         // TurboQuant: inverse WHT on attention output (non-FA path)

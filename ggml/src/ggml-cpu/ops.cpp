@@ -2110,6 +2110,34 @@ void ggml_compute_forward_concat(
     ggml_tensor * dst) {
 
     const ggml_tensor * src0 = dst->src[0];
+    const ggml_tensor * src1 = dst->src[1];
+
+    // [ik_llama.cpp PR #237 port] when both sources and dst are contiguous and the concat
+    // dimension is the outermost non-unit one, the result is just src0 bytes followed by
+    // src1 bytes - copy them in blocks instead of per element
+    {
+        const int32_t dim = ggml_get_op_params_i32(dst, 0);
+
+        if (ggml_is_contiguous(src0) && ggml_is_contiguous(src1) && ggml_is_contiguous(dst) &&
+                (dim == 3 || (dim == 2 && dst->ne[3] == 1) || (dim == 1 && dst->ne[2] * dst->ne[3] == 1))) {
+            const int64_t size_src_0 = ggml_nbytes(src0);
+            const int64_t size_src_1 = ggml_nbytes(src1);
+            const int64_t block_size = 4096;
+            const int64_t num_blocks = (size_src_0 + size_src_1 + block_size - 1) / block_size;
+
+            for (int64_t i_block = params->ith; i_block < num_blocks; i_block += params->nth) {
+                const int64_t start = i_block * block_size;
+                if (start < size_src_0) {
+                    const int64_t copy_size = std::min(block_size, size_src_0 - start);
+                    memcpy((char *) dst->data + start, (const char *) src0->data + start, copy_size);
+                } else {
+                    const int64_t copy_size = std::min(block_size, size_src_0 + size_src_1 - start);
+                    memcpy((char *) dst->data + start, (const char *) src1->data + start - size_src_0, copy_size);
+                }
+            }
+            return;
+        }
+    }
 
     switch (src0->type) {
         case GGML_TYPE_F16:
