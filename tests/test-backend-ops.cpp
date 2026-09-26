@@ -9785,6 +9785,7 @@ static std::vector<std::unique_ptr<test_case>> make_test_cases_eval() {
         test_cases.emplace_back(new test_mul_mat_cr(
             type_a, 33, 1, 1024, cr_activation_pattern::RANDOM,
             {1, 1}, {1, 1}, true));
+    }
 
     // PTQ1_0 / PQ2_0 integer-dot mat-vec: Bonsai-2 shapes, odd row counts (row tail), batches and multi-column B
     for (int64_t n : {1, 2, 3, 4, 5, 6, 7, 8}) {

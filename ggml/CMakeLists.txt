@@ -308,7 +308,9 @@ add_subdirectory(src)
 # tests and examples
 #
 
-if (GGML_BUILD_TESTS)
+if (GGML_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    # this fork carries no ggml/tests; keep the option for upstream parity but
+    # never fail configure when the directory is absent
     enable_testing()
     add_subdirectory(tests)
 endif ()
