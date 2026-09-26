@@ -151,6 +151,7 @@ message(DEBUG "INS_ENB             : ${INS_ENB}")
 option(GGML_CPU_HBM          "ggml: use memkind for CPU HBM" OFF)
 option(GGML_CPU_REPACK       "ggml: use runtime weight conversion of Q4_0 to Q4_X_X" ON)
 option(GGML_CPU_KLEIDIAI     "ggml: use KleidiAI optimized kernels if applicable" OFF)
+option(GGML_SSSE3            "ggml: enable SSSE3"            OFF)
 option(GGML_SSE42            "ggml: enable SSE 4.2"          ${INS_ENB})
 option(GGML_AVX              "ggml: enable AVX"              ${INS_ENB})
 option(GGML_AVX_VNNI         "ggml: enable AVX-VNNI"         OFF)
@@ -199,6 +200,8 @@ option(GGML_LLAMAFILE                       "ggml: use LLAMAFILE"               
 option(GGML_CUDA                            "ggml: use CUDA"                                  OFF)
 option(GGML_MUSA                            "ggml: use MUSA"                                  OFF)
 option(GGML_CUDA_FORCE_MMQ                  "ggml: use mmq kernels instead of cuBLAS"         OFF)
+option(GGML_CUDA_HOPPER_Q1                  "ggml: opt-in sm_90a wgmma path for Q1_0/PQ2_0 prefill" OFF)
+set   (GGML_CUDA_CUTLASS_DIR "" CACHE PATH    "ggml: CUTLASS checkout root for GGML_CUDA_HOPPER_Q1")
 option(GGML_CUDA_FORCE_CUBLAS               "ggml: always use cuBLAS instead of mmq kernels"  OFF)
 set   (GGML_CUDA_PEER_MAX_BATCH_SIZE "128" CACHE STRING
                                             "ggml: max. batch size for using peer access")
@@ -305,7 +308,9 @@ add_subdirectory(src)
 # tests and examples
 #
 
-if (GGML_BUILD_TESTS)
+if (GGML_BUILD_TESTS AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/tests/CMakeLists.txt")
+    # this fork carries no ggml/tests; keep the option for upstream parity but
+    # never fail configure when the directory is absent
     enable_testing()
     add_subdirectory(tests)
 endif ()
