@@ -2127,12 +2127,18 @@ void ggml_compute_forward_concat(
 
             for (int64_t i_block = params->ith; i_block < num_blocks; i_block += params->nth) {
                 const int64_t start = i_block * block_size;
+                const int64_t end   = std::min(start + block_size, size_src_0 + size_src_1);
+
                 if (start < size_src_0) {
-                    const int64_t copy_size = std::min(block_size, size_src_0 - start);
+                    // src0's part of this block; the block may straddle the boundary,
+                    // so also copy src1's head bytes that fall inside it
+                    const int64_t copy_size = std::min(end, size_src_0) - start;
                     memcpy((char *) dst->data + start, (const char *) src0->data + start, copy_size);
+                    if (end > size_src_0) {
+                        memcpy((char *) dst->data + size_src_0, (const char *) src1->data, end - size_src_0);
+                    }
                 } else {
-                    const int64_t copy_size = std::min(block_size, size_src_0 + size_src_1 - start);
-                    memcpy((char *) dst->data + start, (const char *) src1->data + start - size_src_0, copy_size);
+                    memcpy((char *) dst->data + start, (const char *) src1->data + start - size_src_0, end - start);
                 }
             }
             return;
