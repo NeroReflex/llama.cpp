@@ -1235,6 +1235,12 @@ common_init_result::common_init_result(common_params & params, bool model_only) 
             throw std::runtime_error(
                 "failed to fit parameters to device memory (hard error); retry with -fit off");
         }
+        if (fit_status == COMMON_PARAMS_FIT_STATUS_SUCCESS &&
+                params.n_parallel > 0 && (int32_t) cparams.n_seq_max != params.n_parallel) {
+            COM_WRN("fit reduced parallel sequences from %d to %" PRIu32 " so the KV cache fits in device memory\n",
+                    params.n_parallel, cparams.n_seq_max);
+            params.n_parallel = (int32_t) cparams.n_seq_max;
+        }
         if (fit_status != COMMON_PARAMS_FIT_STATUS_SUCCESS) {
             COM_ERR("%s", "fit could not prove a viable placement; restoring the pre-fit parameters\n");
             mparams = mparams_before;

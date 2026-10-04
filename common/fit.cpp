@@ -602,6 +602,33 @@ static void common_params_fit_impl(
         }
     };
 
+    // DeepSeek V4 keeps one KV stream per sequence even when kv_unified is set,
+    // so n_seq_max multiplies the cache. Compare context bytes to detect that.
+    auto context_bytes = [&](const dmds_t & dmds) -> int64_t {
+        if (nd == 0) {
+            return dmds.back().mb.context;
+        }
+        int64_t sum = 0;
+        for (size_t id = 0; id < nd; id++) {
+            sum += dmds[id].mb.context;
+        }
+        return sum;
+    };
+
+    auto meets_margin = [&](const dmds_t & dmds) -> bool {
+        if (nd == 0) {
+            const int64_t free = (int64_t) dmds.back().total - (int64_t) dmds.back().mb.total();
+            return free >= (int64_t) margins_s[0];
+        }
+        for (size_t id = 0; id < nd; id++) {
+            const int64_t free = (int64_t) dmds[id].free - (int64_t) dmds[id].mb.total();
+            if (free < (int64_t) margins_s[id]) {
+                return false;
+            }
+        }
+        return true;
+    };
+
     std::vector<int64_t> margins; // this function uses int64_t rather than size_t for memory sizes to more conveniently handle deficits
     margins.reserve(nd);
     if (nd == 0) {
@@ -706,6 +733,43 @@ static void common_params_fit_impl(
             }
         }
         if (global_surplus < 0) {
+            // Drop sequences before touching context or layers. A shared KV pool
+            // does not shrink, so this no-ops unless context bytes track n_seq_max.
+            if (cparams->n_seq_max > 1) {
+                const uint32_t n_seq_orig = cparams->n_seq_max;
+                const int64_t ctx_orig = context_bytes(dmds_full);
+
+                cparams->n_seq_max = 1;
+                dmds_t dmds_one = common_get_device_memory_data_impl(
+                        path_model, mparams, cparams, devs, hp_ngl, hp_nct, hp_nex, log_level);
+                add_extra_memory(dmds_one);
+
+                const bool per_seq_streams = context_bytes(dmds_one) + 32*MiB < ctx_orig;
+                if (!per_seq_streams || !meets_margin(dmds_one)) {
+                    cparams->n_seq_max = n_seq_orig;
+                } else {
+                    uint32_t best = 1;
+                    uint32_t lo = 2;
+                    uint32_t hi = n_seq_orig - 1;
+                    while (lo <= hi) {
+                        const uint32_t mid = lo + (hi - lo)/2;
+                        cparams->n_seq_max = mid;
+                        dmds_t dmds_mid = common_get_device_memory_data_impl(
+                                path_model, mparams, cparams, devs, hp_ngl, hp_nct, hp_nex, log_level);
+                        add_extra_memory(dmds_mid);
+                        if (meets_margin(dmds_mid)) {
+                            best = mid;
+                            lo = mid + 1;
+                        } else {
+                            hi = mid - 1;
+                        }
+                    }
+                    cparams->n_seq_max = best;
+                    LOG_WRN("%s: n_seq_max %" PRIu32 " -> %" PRIu32 ", KV is one stream per sequence and the full set does not leave the free-memory margin\n",
+                            __func__, n_seq_orig, best);
+                    return;
+                }
+            }
             if (nd <= 1) {
                 LOG_TRC("%s: cannot meet free memory target of %" PRId64 " MiB, need to reduce device memory by %" PRId64 " MiB\n",
                     __func__, margins[0]/MiB, -global_surplus/MiB);
