@@ -788,7 +788,7 @@ llama_model_glm5next::graph::graph(const llama_model & model, const llm_graph_pa
 
     for (int il = 0; il < n_layer; ++il) {
         if ((size_t) il < cparams.embeddings_layer_inp.size() && cparams.embeddings_layer_inp[il]) {
-            res->t_layer_inp[il] = build_hc_mean(ctx0, inpL);
+            res->t_layer_inp[il] = build_hc_mean(inpL);
             cb(res->t_layer_inp[il], "layer_inp", il);
             ggml_build_forward_expand(gf, res->t_layer_inp[il]);
         }
@@ -838,7 +838,7 @@ llama_model_glm5next::graph::graph(const llama_model & model, const llm_graph_pa
     }
 
     if ((size_t) n_layer < cparams.embeddings_layer_inp.size() && cparams.embeddings_layer_inp[n_layer]) {
-        res->t_layer_inp[n_layer] = build_hc_mean(ctx0, inpL);
+        res->t_layer_inp[n_layer] = build_hc_mean(inpL);
         cb(res->t_layer_inp[n_layer], "layer_inp", n_layer);
         ggml_build_forward_expand(gf, res->t_layer_inp[n_layer]);
     }
@@ -850,7 +850,7 @@ llama_model_glm5next::graph::graph(const llama_model & model, const llm_graph_pa
     }
 
     // no hc_head tensor here: unweighted mean, not DeepSeek-V4's learned gated head
-    cur = build_hc_mean(ctx0, inpL);
+    cur = build_hc_mean(inpL);
     cb(cur, "hc_mean", -1);
 
     cur = build_norm(cur, model.output_norm, nullptr, LLM_NORM_RMS, -1);

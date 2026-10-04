@@ -156,6 +156,7 @@ public:
     //
 
     uint32_t get_size()     const;
+    uint32_t get_n_seq_max() const;
     uint32_t get_n_stream() const;
     std::vector<uint32_t> get_layer_ids() const;
     ggml_tensor * get_k_storage(int32_t il) const;
@@ -166,6 +167,9 @@ public:
     ggml_type type_v() const;
 
     const llama_kv_cells & get_cells(llama_seq_id seq_id) const;
+
+    // The stream holding seq_id's cells.
+    uint32_t get_stream(llama_seq_id seq_id) const;
 
     // state_read, plus the cells the restored tokens were placed in
     // a cache that mirrors another one (the qwen4exp indexer) must not search for its own cells: two searches agree only by luck

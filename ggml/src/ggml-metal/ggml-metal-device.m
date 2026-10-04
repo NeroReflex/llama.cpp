@@ -1644,13 +1644,6 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
         case GGML_OP_POOL_2D:
             return op->src[0]->type == GGML_TYPE_F32;
         case GGML_OP_PAD:
-            // TODO: add circular padding support for metal, see https://github.com/ggml-org/llama.cpp/pull/16985
-            if (ggml_get_op_params_i32(op, 8) != 0) {
-                return false;
-            }
-
-            return (ggml_get_op_params_i32(op, 0) == 0) && (ggml_get_op_params_i32(op, 2) == 0) &&
-                   (ggml_get_op_params_i32(op, 4) == 0) && (ggml_get_op_params_i32(op, 6) == 0);
         case GGML_OP_PAD_REFLECT_1D:
         case GGML_OP_TIMESTEP_EMBEDDING:
             return op->src[0]->type == GGML_TYPE_F32;
@@ -1720,6 +1713,35 @@ bool ggml_metal_device_supports_op(ggml_metal_device_t dev, const struct ggml_te
                     return false;
             }
             return has_simdgroup_mm; // TODO: over-restricted for vec-kernels
+        case GGML_OP_LIGHTNING_INDEXER:
+            if (op->src[0]->ne[0] != OP_LIGHTNING_INDEXER_DK) {
+                return false;
+            }
+            if (!has_simdgroup_mm ||
+                op->src[0]->type != GGML_TYPE_F32 ||
+                op->src[2]->type != GGML_TYPE_F32 ||
+                op->src[3]->type != GGML_TYPE_F16 ||
+                op->type         != GGML_TYPE_F32 ||
+                !ggml_is_contiguous_rows(op->src[0]) ||
+                !ggml_is_contiguous_rows(op->src[1]) ||
+                !ggml_is_contiguous_rows(op->src[2]) ||
+                !ggml_is_contiguous_rows(op->src[3])) {
+                return false;
+            }
+            switch (op->src[1]->type) {
+                case GGML_TYPE_F32:
+                case GGML_TYPE_F16:
+                case GGML_TYPE_Q4_0:
+                case GGML_TYPE_Q4_1:
+                case GGML_TYPE_Q5_0:
+                case GGML_TYPE_Q5_1:
+                case GGML_TYPE_Q8_0:
+                    return true;
+                case GGML_TYPE_BF16:
+                    return has_bfloat;
+                default:
+                    return false;
+            }
         case GGML_OP_DSV4_HC_COMB:
             return has_simdgroup_reduction &&
                 op->src[0]->type == GGML_TYPE_F32 &&
@@ -2318,6 +2340,8 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * 
         dispatch_release(completion_semaphore);
 
         //[cmd_buf waitUntilCompleted];
+
+        [buf_src release];
     }
 }
 
@@ -2356,6 +2380,8 @@ void ggml_metal_buffer_get_tensor(ggml_metal_buffer_t buf, const struct ggml_ten
 
         [cmd_buf commit];
         [cmd_buf waitUntilCompleted];
+
+        [buf_dst release];
     }
 }
 
