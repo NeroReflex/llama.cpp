@@ -16,6 +16,7 @@
 #include "ops.h"
 #include "ggml.h"
 #include "common.h"
+#include "tiled/tiled.h"
 
 #if defined(_MSC_VER) || defined(__MINGW32__)
 #include <malloc.h> // using malloc.h with MSC/MINGW
@@ -1386,6 +1387,11 @@ void ggml_compute_forward_mul_mat(
         return;
     }
 
+    // If tiled is supported, it will execute the full op here and we return
+    if (ggml_compute_forward_mul_mat_tiled(params, dst)) {
+        return;
+    }
+
     GGML_TENSOR_BINARY_OP_LOCALS
 
     const int ith = params->ith;
@@ -1450,9 +1456,9 @@ UseGgmlGemm1:;
         const size_t nbw3 = nbw2*ne12;
 
         assert(params->wsize >= ne13*nbw3);
-        // F16 src1 converts straight to float, so wdata rows must be floats; a quantized vec_dot_type would overrun the buffer
-        GGML_ASSERT(src1->type == GGML_TYPE_F32 ||
-                    (src1->type == GGML_TYPE_F16 && vec_dot_type == GGML_TYPE_F32));
+        GGML_ASSERT(src1->type == GGML_TYPE_F32 || src1->type == GGML_TYPE_F16);
+        // the F16 path below writes plain floats into wdata, so it needs an F32 vec_dot_type
+        GGML_ASSERT(src1->type == GGML_TYPE_F32 || vec_dot_type == GGML_TYPE_F32);
 
     #if 0
         for (int64_t i13 = 0; i13 < ne13; ++i13) {
@@ -1732,6 +1738,10 @@ static void ggml_compute_forward_mul_mat_id_impl(
     char (*atomic_current_chunk)[CACHE_LINE_SIZE] = // [n_as]
         incr_ptr_aligned(&wdata_cur, CACHE_LINE_SIZE * n_as, CACHE_LINE_SIZE);
 
+    // Tiled matmul (see tiled.h); per-thread work buffers, 0 bytes when disabled. The
+    // reservation is unconditional, the per expert eligibility is decided at dispatch time
+    char * tiled_scratch = incr_ptr_aligned(&wdata_cur, ggml_tiled_wdata_size(nth, dst), 64);
+
     GGML_ASSERT(params->wsize >= (size_t)((char *) wdata_cur - (char *) params->wdata));
 
     if (src1->type != vec_dot_type) {
@@ -1865,6 +1875,11 @@ static void ggml_compute_forward_mul_mat_id_impl(
         const int64_t cne1 = matrix_row_counts[cur_a];
 
         if (cne1 == 0) {
+            continue;
+        }
+
+        // tiled takes over if profitable for this expert (see tiled.h)
+        if (ggml_compute_forward_mul_mat_id_tiled(params, dst, cur_a, cne1, (const int32_t *) &MMID_MATRIX_ROW(cur_a, 0), tiled_scratch)) {
             continue;
         }
 
@@ -2575,6 +2590,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
                 case GGML_GLU_OP_SWIGLU_OAI:
                 case GGML_GLU_OP_GEGLU_ERF:
                 case GGML_GLU_OP_GEGLU_QUICK:
+                case GGML_GLU_OP_SWIGLU_CLAMP:
                     {
                         n_tasks = n_threads;
                     } break;
@@ -3120,6 +3136,9 @@ struct ggml_cplan ggml_graph_plan(
                         if (node->src[1]->type != vec_dot_type) {
                             cur = ggml_row_size(vec_dot_type, ggml_nelements(node->src[1]));
                         }
+                        // Workspace for tiled (see tiled.h)
+                        cur = GGML_PAD(cur, 64);
+                        cur += ggml_tiled_wdata_size(n_tasks, node);
                     } break;
                 case GGML_OP_MUL_MAT_ID:
                     {
@@ -3139,6 +3158,9 @@ struct ggml_cplan ggml_graph_plan(
                         cur += n_as*ids->ne[0]*ids->ne[1]*sizeof(struct mmid_row_mapping) + sizeof(int64_t);
                         // atomic_current_chunk
                         cur += CACHE_LINE_SIZE*n_as + CACHE_LINE_SIZE;
+                        // Workspace for tiled (see tiled.h)
+                        cur = GGML_PAD(cur, 64);
+                        cur += ggml_tiled_wdata_size(n_tasks, node);
                     } break;
                 case GGML_OP_OUT_PROD:
                     {
@@ -3199,12 +3221,13 @@ struct ggml_cplan ggml_graph_plan(
                         const int64_t ne10 = node->src[1]->ne[0]; // W
                         const int64_t ne11 = node->src[1]->ne[1]; // H
                         const int64_t ne12 = node->src[1]->ne[2]; // Channels In
+                        const int64_t ne13 = node->src[1]->ne[3]; // Batch
 
                         GGML_ASSERT(node->src[0]->type == GGML_TYPE_F16 || node->src[0]->type == GGML_TYPE_F32);
                         GGML_ASSERT(node->src[1]->type == GGML_TYPE_F32);
 
                         cur += ggml_type_size(node->src[0]->type) * ne00 * ne01 * ne02 * ne03;
-                        cur += ggml_type_size(node->src[0]->type) * ne10 * ne11 * ne12;
+                        cur += ggml_type_size(node->src[0]->type) * ne10 * ne11 * ne12 * ne13;
 
                     } break;
                 case GGML_OP_TOP_K:

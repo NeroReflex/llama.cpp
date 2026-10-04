@@ -272,6 +272,19 @@ static const char * split_mode_str(llama_split_mode mode) {
     }
 }
 
+static const char * lazy_mode_str(llama_lazy_mode mode) {
+    switch (mode) {
+        case LLAMA_LAZY_MODE_OFF:
+            return "off";
+        case LLAMA_LAZY_MODE_AUTO:
+            return "auto";
+        case LLAMA_LAZY_MODE_ON:
+            return "on";
+        default:
+            GGML_ABORT("invalid lazy mode");
+    }
+}
+
 static std::string pair_str(const std::pair<int, int> & p) {
     static char buf[32];
     snprintf(buf, sizeof(buf), "%d,%d", p.first, p.second);
@@ -425,6 +438,7 @@ struct cmd_params {
     std::string                      repack;
     std::vector<llama_split_mode>    split_mode;
     std::vector<llama_load_mode>     load_mode;
+    std::vector<llama_lazy_mode>     lazy_mode;
     std::vector<int>                 main_gpu;
     std::vector<bool>                no_kv_offload;
     std::vector<llama_flash_attn_type> flash_attn;
@@ -434,6 +448,7 @@ struct cmd_params {
     std::vector<bool>                embeddings;
     std::vector<bool>                no_op_offload;
     std::vector<bool>                no_host;
+    std::vector<bool>                repack;
     std::vector<size_t>              fit_params_target;
     std::vector<uint32_t>            fit_params_min_ctx;
     ggml_numa_strategy               numa;
@@ -475,6 +490,7 @@ static const cmd_params cmd_params_defaults = {
     /* repack               */ "auto",
     /* split_mode           */ { LLAMA_SPLIT_MODE_LAYER },
     /* load_mode            */ { LLAMA_LOAD_MODE_AUTO },
+    /* lazy_mode            */ { LLAMA_LAZY_MODE_AUTO },
     /* main_gpu             */ { 0 },
     /* no_kv_offload        */ { false },
     /* flash_attn           */ { LLAMA_FLASH_ATTN_TYPE_AUTO },
@@ -484,6 +500,7 @@ static const cmd_params cmd_params_defaults = {
     /* embeddings           */ { false },
     /* no_op_offload        */ { false },
     /* no_host              */ { false },
+    /* repack               */ { llama_model_default_params().use_extra_bufts },
     /* fit_params_target    */ { 0 },
     /* fit_params_min_ctx   */ { 0 },
     /* numa                 */ GGML_NUMA_STRATEGY_DISABLED,
@@ -505,6 +522,7 @@ static void print_usage(int /* argc */, char ** argv) {
     printf("\n");
     printf("options:\n");
     printf("  -h, --help\n");
+    printf("  --version                                   show version and build info\n");
     printf("  --numa <distribute|isolate|numactl>         numa mode (default: disabled)\n");
     printf("  -r, --repetitions <n>                       number of times to repeat each test (default: %d)\n", cmd_params_defaults.reps);
     printf("  --prio <-1|0|1|2|3>                         process/thread priority (default: %d)\n", cmd_params_defaults.prio);
@@ -558,14 +576,14 @@ static void print_usage(int /* argc */, char ** argv) {
     printf("  -fa, --flash-attn <on|off|auto>                   (default: %s)\n", join(transform_to_str(cmd_params_defaults.flash_attn, llama_flash_attn_type_name), ",").c_str());
     printf("  -dev, --device <dev0/dev1/...>                    (default: auto)\n");
     printf("  -lm, --load-mode <auto|none|mmap|mlock|mmap+mlock|dio> (default: %s)\n", join(transform_to_str(cmd_params_defaults.load_mode, llama_load_mode_name), ",").c_str());
-    printf("  -mmp, --mmap <0|1>                                (DEPRECATED IN FAVOUR OF --load-mode)\n");
-    printf("  -dio, --direct-io <0|1>                           (DEPRECATED IN FAVOUR OF --load-mode)\n");
+    printf("  -lzm, --lazy-mode <on|auto|off>                   (default: %s)\n", join(transform_to_str(cmd_params_defaults.lazy_mode, lazy_mode_str), ",").c_str());
     printf("  -embd, --embeddings <0|1>                         (default: %s)\n", join(cmd_params_defaults.embeddings, ",").c_str());
     printf("  -ts, --tensor-split <ts0/ts1/..>                  (default: 0)\n");
     printf("  -ot --override-tensor <tensor name pattern>=<buffer type>;...\n");
     printf("                                                    (default: disabled)\n");
     printf("  -nopo, --no-op-offload <0|1>                      (default: 0)\n");
     printf("  --no-host <0|1>                                   (default: %s)\n", join(cmd_params_defaults.no_host, ",").c_str());
+    printf("  --repack <0|1>                                    (default: %s)\n", join(cmd_params_defaults.repack, ",").c_str());
     printf("\n");
     printf(
         "Multiple values can be given for list-valued parameters by separating them with ','\n"
@@ -653,6 +671,9 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
         try {
             if (arg == "-h" || arg == "--help") {
                 print_usage(argc, argv);
+                exit(0);
+            } else if (arg == "--version") {
+                llama_print_build_info(llama_version());
                 exit(0);
             } else if (arg == "-m" || arg == "--model") {
                 if (++i >= argc) {
@@ -936,6 +957,32 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                     break;
                 }
                 params.load_mode.insert(params.load_mode.end(), modes.begin(), modes.end());
+            } else if (arg == "-lzm" || arg == "--lazy-mode") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = string_split<std::string>(argv[i], split_delim);
+
+                std::vector<llama_lazy_mode> modes;
+                for (const auto & m : p) {
+                    llama_lazy_mode mode;
+                    if (m == "on") {
+                        mode = LLAMA_LAZY_MODE_ON;
+                    } else if (m == "auto") {
+                        mode = LLAMA_LAZY_MODE_AUTO;
+                    } else if (m == "off") {
+                        mode = LLAMA_LAZY_MODE_OFF;
+                    } else {
+                        invalid_param = true;
+                        break;
+                    }
+                    modes.push_back(mode);
+                }
+                if (invalid_param) {
+                    break;
+                }
+                params.lazy_mode.insert(params.lazy_mode.end(), modes.begin(), modes.end());
             } else if (arg == "-mg" || arg == "--main-gpu") {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -991,44 +1038,6 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                     break;
                 }
                 params.flash_attn.insert(params.flash_attn.end(), types.begin(), types.end());
-            } else if (arg == "-mmp" || arg == "--mmap") {
-                if (++i >= argc) {
-                    invalid_param = true;
-                    break;
-                }
-                LOG_WRN("DEPRECATED: -mmp and --mmap are deprecated in favour of --load-mode. Please use --load-mode mmap instead.\n");
-                auto p = string_split<bool>(argv[i], split_delim);
-
-                std::vector<llama_load_mode> modes;
-                for (const auto & m : p) {
-                    llama_load_mode mode;
-                    if (m) {
-                        mode = LLAMA_LOAD_MODE_MMAP;
-                    } else {
-                        mode = LLAMA_LOAD_MODE_NONE;
-                    }
-                    modes.push_back(mode);
-                }
-                params.load_mode.insert(params.load_mode.end(), modes.begin(), modes.end());
-            } else if (arg == "-dio" || arg == "--direct-io") {
-                if (++i >= argc) {
-                    invalid_param = true;
-                    break;
-                }
-                LOG_WRN("DEPRECATED: -dio and --direct-io are deprecated in favour of --load-mode. Please use --load-mode dio instead.\n");
-                auto p = string_split<bool>(argv[i], split_delim);
-
-                std::vector<llama_load_mode> modes;
-                for (const auto & m : p) {
-                    llama_load_mode mode;
-                    if (m) {
-                        mode = LLAMA_LOAD_MODE_DIRECT_IO;
-                    } else {
-                        mode = LLAMA_LOAD_MODE_NONE;
-                    }
-                    modes.push_back(mode);
-                }
-                params.load_mode.insert(params.load_mode.end(), modes.begin(), modes.end());
             } else if (arg == "-embd" || arg == "--embeddings") {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -1050,6 +1059,13 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
                 }
                 auto p = string_split<bool>(argv[i], split_delim);
                 params.no_host.insert(params.no_host.end(), p.begin(), p.end());
+            } else if (arg == "--repack") {
+                if (++i >= argc) {
+                    invalid_param = true;
+                    break;
+                }
+                auto p = string_split<bool>(argv[i], split_delim);
+                params.repack.insert(params.repack.end(), p.begin(), p.end());
             } else if (arg == "-ts" || arg == "--tensor-split") {
                 if (++i >= argc) {
                     invalid_param = true;
@@ -1231,7 +1247,7 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
             p.hf_token      = params.hf_token;
             p.offline       = params.offline;
             p.model.hf_repo = params.hf_repo[i];
-            if (!params.hf_file.empty() && !params.hf_file[i].empty()) {
+            if (i < params.hf_file.size() && !params.hf_file[i].empty()) {
                 p.model.hf_file = params.hf_file[i];
             }
 
@@ -1295,6 +1311,9 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
     if (params.load_mode.empty()) {
         params.load_mode = cmd_params_defaults.load_mode;
     }
+    if (params.lazy_mode.empty()) {
+        params.lazy_mode = cmd_params_defaults.lazy_mode;
+    }
     if (params.main_gpu.empty()) {
         params.main_gpu = cmd_params_defaults.main_gpu;
     }
@@ -1321,6 +1340,9 @@ static cmd_params parse_cmd_params(int argc, char ** argv) {
     }
     if (params.no_host.empty()) {
         params.no_host = cmd_params_defaults.no_host;
+    }
+    if (params.repack.empty()) {
+        params.repack = cmd_params_defaults.repack;
     }
     if (params.n_threads.empty()) {
         params.n_threads = cmd_params_defaults.n_threads;
@@ -1375,6 +1397,7 @@ struct cmd_params_instance {
     bool               repack;
     llama_split_mode   split_mode;
     llama_load_mode    load_mode;
+    llama_lazy_mode    lazy_mode;
     int                main_gpu;
     bool               no_kv_offload;
     llama_flash_attn_type flash_attn;
@@ -1384,6 +1407,7 @@ struct cmd_params_instance {
     bool               embeddings;
     bool               no_op_offload;
     bool               no_host;
+    bool               repack;
     size_t             fit_target;
     uint32_t           fit_min_ctx;
 
@@ -1396,10 +1420,12 @@ struct cmd_params_instance {
         }
         mparams.split_mode    = split_mode;
         mparams.load_mode     = load_mode;
+        mparams.lazy_mode     = lazy_mode;
         mparams.main_gpu      = main_gpu;
         mparams.tensor_split  = tensor_split.data();
         mparams.use_extra_bufts = repack;
         mparams.no_host       = no_host;
+        mparams.use_extra_bufts = repack;
 
         if (n_cpu_moe <= 0) {
             if (tensor_buft_overrides.empty()) {
@@ -1445,7 +1471,8 @@ struct cmd_params_instance {
                repack == other.repack &&
                split_mode == other.split_mode &&
                main_gpu == other.main_gpu && tensor_split == other.tensor_split &&
-               load_mode == other.load_mode && devices == other.devices && no_host == other.no_host &&
+               load_mode == other.load_mode && lazy_mode == other.lazy_mode &&
+               devices == other.devices && no_host == other.no_host && repack == other.repack &&
                vec_tensor_buft_override_equal(tensor_buft_overrides, other.tensor_buft_overrides);
     }
 
@@ -1480,11 +1507,13 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
     for (const auto & mc : params.moe_cache)
     for (const auto & sm : params.split_mode)
     for (const auto & lm : params.load_mode)
+    for (const auto & lzm : params.lazy_mode)
     for (const auto & mg : params.main_gpu)
     for (const auto & devs : params.devices)
     for (const auto & ts : params.tensor_split)
     for (const auto & ot : params.tensor_buft_overrides)
     for (const auto & noh : params.no_host)
+    for (const auto & rpk : params.repack)
     for (const auto & embd : params.embeddings)
     for (const auto & nopo : params.no_op_offload)
     for (const auto & nb : params.n_batch)
@@ -1522,6 +1551,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .repack                = */ get_effective_repack(mc, params.repack),
                 /* .split_mode            = */ sm,
                 /* .load_mode             = */ lm,
+                /* .lazy_mode             = */ lzm,
                 /* .main_gpu              = */ mg,
                 /* .no_kv_offload         = */ nkvo,
                 /* .flash_attn            = */ fa,
@@ -1531,6 +1561,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings            = */ embd,
                 /* .no_op_offload         = */ nopo,
                 /* .no_host               = */ noh,
+                /* .repack                = */ rpk,
                 /* .fit_target            = */ fpt,
                 /* .fit_min_ctx           = */ fpc,
             };
@@ -1561,6 +1592,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .repack                = */ get_effective_repack(mc, params.repack),
                 /* .split_mode            = */ sm,
                 /* .load_mode             = */ lm,
+                /* .lazy_mode             = */ lzm,
                 /* .main_gpu              = */ mg,
                 /* .no_kv_offload         = */ nkvo,
                 /* .flash_attn            = */ fa,
@@ -1570,6 +1602,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings            = */ embd,
                 /* .no_op_offload         = */ nopo,
                 /* .no_host               = */ noh,
+                /* .repack                = */ rpk,
                 /* .fit_target            = */ fpt,
                 /* .fit_min_ctx           = */ fpc,
             };
@@ -1600,6 +1633,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .repack                = */ get_effective_repack(mc, params.repack),
                 /* .split_mode            = */ sm,
                 /* .load_mode             = */ lm,
+                /* .lazy_mode             = */ lzm,
                 /* .main_gpu              = */ mg,
                 /* .no_kv_offload         = */ nkvo,
                 /* .flash_attn            = */ fa,
@@ -1609,6 +1643,7 @@ static std::vector<cmd_params_instance> get_cmd_params_instances(const cmd_param
                 /* .embeddings            = */ embd,
                 /* .no_op_offload         = */ nopo,
                 /* .no_host               = */ noh,
+                /* .repack                = */ rpk,
                 /* .fit_target            = */ fpt,
                 /* .fit_min_ctx           = */ fpc,
             };
@@ -1644,6 +1679,7 @@ struct test {
     bool                     repack;
     llama_split_mode         split_mode;
     llama_load_mode          load_mode;
+    llama_lazy_mode          lazy_mode;
     int                      main_gpu;
     bool                     no_kv_offload;
     llama_flash_attn_type    flash_attn;
@@ -1653,6 +1689,7 @@ struct test {
     bool                     embeddings;
     bool                     no_op_offload;
     bool                     no_host;
+    bool                     repack;
     size_t                   fit_target;
     uint32_t                 fit_min_ctx;
     int                      n_prompt;
@@ -1697,6 +1734,7 @@ struct test {
         split_mode     = mparams.split_mode;
         load_mode      = mparams.load_mode;
         main_gpu       = mparams.main_gpu;
+        lazy_mode      = inst.lazy_mode;
         no_kv_offload  = inst.no_kv_offload;
         flash_attn     = inst.flash_attn;
         devices        = inst.devices;
@@ -1718,6 +1756,7 @@ struct test {
         embeddings     = inst.embeddings;
         no_op_offload  = inst.no_op_offload;
         no_host        = inst.no_host;
+        repack         = inst.repack;
         fit_target     = inst.fit_target;
         fit_min_ctx    = inst.fit_min_ctx;
         n_prompt       = inst.n_prompt;
@@ -1778,9 +1817,9 @@ struct test {
             "type_k",         "type_v",         "n_gpu_layers",  "n_cpu_moe",      "moe_cache",
             "moe_cache_fit",  "repack",         "split_mode",
             "main_gpu",       "no_kv_offload",  "flash_attn",    "devices",        "tensor_split",
-            "tensor_buft_overrides",            "load_mode",     "embeddings",
-            "no_op_offload",  "no_host",        "fit_target",    "fit_min_ctx",
-            "n_prompt",       "n_gen",          "n_gen_warmup",  "n_depth",
+            "tensor_buft_overrides",            "load_mode",     "lazy_mode",     "embeddings",
+            "no_op_offload",  "no_host",        "fit_target",    "fit_min_ctx",   "n_gen_warmup",
+            "n_prompt",       "n_gen",          "n_depth",
             "test_time",      "avg_ns",         "stddev_ns",     "avg_ts",         "stddev_ts"
         };
         return fields;
@@ -1804,7 +1843,7 @@ struct test {
         if (field == "avg_ts" || field == "stddev_ts") {
             return FLOAT;
         }
-        if (field == "load_mode") {
+        if (field == "load_mode" || field == "lazy_mode") {
             return STRING;
         }
         return STRING;
@@ -1877,9 +1916,11 @@ struct test {
                                             tensor_split_str,
                                             tensor_buft_overrides_str,
                                             llama_load_mode_name(load_mode),
+                                            lazy_mode_str(lazy_mode),
                                             std::to_string(embeddings),
                                             std::to_string(no_op_offload),
                                             std::to_string(no_host),
+                                            std::to_string(repack),
                                             std::to_string(fit_target),
                                             std::to_string(fit_min_ctx),
                                             std::to_string(n_prompt),
@@ -2087,6 +2128,9 @@ struct markdown_printer : public printer {
         if (field == "no_host") {
             return 4;
         }
+        if (field == "repack") {
+            return 3;
+        }
 
         int width = std::max((int) field.length(), 10);
 
@@ -2132,6 +2176,9 @@ struct markdown_printer : public printer {
         }
         if (field == "no_host") {
             return "noh";
+        }
+        if (field == "repack") {
+            return "rpk";
         }
         if (field == "devices") {
             return "dev";
@@ -2235,6 +2282,9 @@ struct markdown_printer : public printer {
         if (params.load_mode.size() > 1 || params.load_mode != cmd_params_defaults.load_mode) {
             fields.emplace_back("load_mode");
         }
+        if (params.lazy_mode.size() > 1 || params.lazy_mode != cmd_params_defaults.lazy_mode) {
+            fields.emplace_back("lazy_mode");
+        }
         if (params.embeddings.size() > 1 || params.embeddings != cmd_params_defaults.embeddings) {
             fields.emplace_back("embeddings");
         }
@@ -2243,6 +2293,9 @@ struct markdown_printer : public printer {
         }
         if (params.no_host.size() > 1 || params.no_host != cmd_params_defaults.no_host) {
             fields.emplace_back("no_host");
+        }
+        if (params.repack.size() > 1 || params.repack != cmd_params_defaults.repack) {
+            fields.emplace_back("repack");
         }
         if (params.fit_params_target.size() > 1 || params.fit_params_target != cmd_params_defaults.fit_params_target) {
             fields.emplace_back("fit_target");

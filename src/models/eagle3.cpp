@@ -239,3 +239,4 @@ llm_build_eagle3_decode::llm_build_eagle3_decode(const llama_model & model, cons
 
     ggml_build_forward_expand(gf, cur);
 }
+

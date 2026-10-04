@@ -75,6 +75,7 @@ test parameters:
   -dev, --device <dev0/dev1/...>            (default: auto)
   -lm, --load-mode <auto|none|mmap|mlock|mmap+mlock|dio>
                                             (default: auto)
+  -lzm, --lazy-mode <on|auto|off>           (default: auto)
   -mmp, --mmap <0|1>                        (DEPRECATED IN FAVOUR OF --load-mode)
   -dio, --direct-io <0|1>                   (DEPRECATED IN FAVOUR OF --load-mode)
   -embd, --embeddings <0|1>                 (default: 0)
@@ -83,6 +84,7 @@ test parameters:
                                             (default: disabled)
   -nopo, --no-op-offload <0|1>              (default: 0)
   --no-host <0|1>                           (default: 0)
+  --repack <0|1>                            (default: 1)
 
 Multiple values can be given for each parameter by separating them with ','
 or by specifying the parameter multiple times. Ranges can be given as
@@ -234,6 +236,11 @@ $ ./llama-bench -o csv
 ```
 
 CSV prints one header row followed by one row per benchmark result. Repetition samples are summarized by the aggregate timing fields.
+```csv
+build_commit,build_number,cpu_info,gpu_info,backends,model_filename,model_type,model_size,model_n_params,n_batch,n_ubatch,n_threads,cpu_mask,cpu_strict,poll,type_k,type_v,n_gpu_layers,n_cpu_moe,split_mode,main_gpu,no_kv_offload,flash_attn,devices,tensor_split,tensor_buft_overrides,use_mmap,use_direct_io,embeddings,no_op_offload,no_host,repack,fit_target,fit_min_ctx,n_prompt,n_gen,n_depth,test_time,avg_ns,stddev_ns,avg_ts,stddev_ts
+"8cf427ff","5163","AMD Ryzen 7 7800X3D 8-Core Processor","NVIDIA GeForce RTX 4080","CUDA","models/Qwen2.5-7B-Instruct-Q4_K_M.gguf","qwen2 7B Q4_K - Medium","4677120000","7615616512","2048","512","8","0x0","0","50","f16","f16","-1","0","layer","0","0","-1","auto","0.00","none","1","0","0","0","0","0","0","512","0","0","2025-04-24T11:57:09Z","70285660","982040","7285.676949","100.064434"
+"8cf427ff","5163","AMD Ryzen 7 7800X3D 8-Core Processor","NVIDIA GeForce RTX 4080","CUDA","models/Qwen2.5-7B-Instruct-Q4_K_M.gguf","qwen2 7B Q4_K - Medium","4677120000","7615616512","2048","512","8","0x0","0","50","f16","f16","-1","0","layer","0","0","-1","auto","0.00","none","1","0","0","0","0","0","0","0","128","0","2025-04-24T11:57:10Z","1067431600","3834831","119.915244","0.430617"
+```
 
 ### JSON
 
@@ -242,6 +249,103 @@ $ ./llama-bench -o json
 ```
 
 JSON prints an array of benchmark objects. Each object also contains `samples_ns` and `samples_ts` arrays for the individual repetitions.
+```json
+[
+  {
+    "build_commit": "8cf427ff",
+    "build_number": 5163,
+    "cpu_info": "AMD Ryzen 7 7800X3D 8-Core Processor",
+    "gpu_info": "NVIDIA GeForce RTX 4080",
+    "backends": "CUDA",
+    "model_filename": "models/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+    "model_type": "qwen2 7B Q4_K - Medium",
+    "model_size": 4677120000,
+    "model_n_params": 7615616512,
+    "n_batch": 2048,
+    "n_ubatch": 512,
+    "n_threads": 8,
+    "cpu_mask": "0x0",
+    "cpu_strict": false,
+    "poll": 50,
+    "type_k": "f16",
+    "type_v": "f16",
+    "n_gpu_layers": -1,
+    "n_cpu_moe": 0,
+    "split_mode": "layer",
+    "main_gpu": 0,
+    "no_kv_offload": false,
+    "flash_attn": -1,
+    "devices": "auto",
+    "tensor_split": "0.00",
+    "tensor_buft_overrides": "none",
+    "use_mmap": true,
+    "use_direct_io": false,
+    "embeddings": false,
+    "no_op_offload": 0,
+    "no_host": false,
+    "repack": true,
+    "fit_target": 0,
+    "fit_min_ctx": 0,
+    "n_prompt": 512,
+    "n_gen": 0,
+    "n_depth": 0,
+    "test_time": "2025-04-24T11:58:50Z",
+    "avg_ns": 72135640,
+    "stddev_ns": 1453752,
+    "avg_ts": 7100.002165,
+    "stddev_ts": 140.341520,
+    "samples_ns": [ 74601900, 71632900, 71745200, 71952700, 70745500 ],
+    "samples_ts": [ 6863.1, 7147.55, 7136.37, 7115.79, 7237.21 ]
+  },
+  {
+    "build_commit": "8cf427ff",
+    "build_number": 5163,
+    "cpu_info": "AMD Ryzen 7 7800X3D 8-Core Processor",
+    "gpu_info": "NVIDIA GeForce RTX 4080",
+    "backends": "CUDA",
+    "model_filename": "models/Qwen2.5-7B-Instruct-Q4_K_M.gguf",
+    "model_type": "qwen2 7B Q4_K - Medium",
+    "model_size": 4677120000,
+    "model_n_params": 7615616512,
+    "n_batch": 2048,
+    "n_ubatch": 512,
+    "n_threads": 8,
+    "cpu_mask": "0x0",
+    "cpu_strict": false,
+    "poll": 50,
+    "type_k": "f16",
+    "type_v": "f16",
+    "n_gpu_layers": -1,
+    "n_cpu_moe": 0,
+    "split_mode": "layer",
+    "main_gpu": 0,
+    "no_kv_offload": false,
+    "flash_attn": -1,
+    "devices": "auto",
+    "tensor_split": "0.00",
+    "tensor_buft_overrides": "none",
+    "use_mmap": true,
+    "use_direct_io": false,
+    "embeddings": false,
+    "no_op_offload": 0,
+    "no_host": false,
+    "repack": true,
+    "fit_target": 0,
+    "fit_min_ctx": 0,
+    "n_prompt": 0,
+    "n_gen": 128,
+    "n_depth": 0,
+    "test_time": "2025-04-24T11:58:51Z",
+    "avg_ns": 1076767880,
+    "stddev_ns": 9449585,
+    "avg_ts": 118.881588,
+    "stddev_ts": 1.041811,
+    "samples_ns": [ 1075361300, 1065089400, 1071761200, 1081934900, 1089692600 ],
+    "samples_ts": [ 119.03, 120.178, 119.43, 118.307, 117.464 ]
+  }
+]
+```
+
 
 ### JSONL
 
@@ -250,6 +354,11 @@ $ ./llama-bench -o jsonl
 ```
 
 JSONL prints the same objects as JSON, one complete object per line.
+```json lines
+{"build_commit": "8cf427ff", "build_number": 5163, "cpu_info": "AMD Ryzen 7 7800X3D 8-Core Processor", "gpu_info": "NVIDIA GeForce RTX 4080", "backends": "CUDA", "model_filename": "models/Qwen2.5-7B-Instruct-Q4_K_M.gguf", "model_type": "qwen2 7B Q4_K - Medium", "model_size": 4677120000, "model_n_params": 7615616512, "n_batch": 2048, "n_ubatch": 512, "n_threads": 8, "cpu_mask": "0x0", "cpu_strict": false, "poll": 50, "type_k": "f16", "type_v": "f16", "n_gpu_layers": -1, "n_cpu_moe": 0, "split_mode": "layer", "main_gpu": 0, "no_kv_offload": false, "flash_attn": -1, "devices": "auto", "tensor_split": "0.00", "tensor_buft_overrides": "none", "use_mmap": true, "use_direct_io": false, "embeddings": false, "no_op_offload": 0, "no_host": false, "repack": true, "fit_target": 0, "fit_min_ctx": 0, "n_prompt": 512, "n_gen": 0, "n_depth": 0, "test_time": "2025-04-24T11:59:33Z", "avg_ns": 70497220, "stddev_ns": 883196, "avg_ts": 7263.609157, "stddev_ts": 90.940578, "samples_ns": [ 71551000, 71222800, 70364100, 69439100, 69909100 ],"samples_ts": [ 7155.74, 7188.71, 7276.44, 7373.37, 7323.8 ]}
+{"build_commit": "8cf427ff", "build_number": 5163, "cpu_info": "AMD Ryzen 7 7800X3D 8-Core Processor", "gpu_info": "NVIDIA GeForce RTX 4080", "backends": "CUDA", "model_filename": "models/Qwen2.5-7B-Instruct-Q4_K_M.gguf", "model_type": "qwen2 7B Q4_K - Medium", "model_size": 4677120000, "model_n_params": 7615616512, "n_batch": 2048, "n_ubatch": 512, "n_threads": 8, "cpu_mask": "0x0", "cpu_strict": false, "poll": 50, "type_k": "f16", "type_v": "f16", "n_gpu_layers": -1, "n_cpu_moe": 0, "split_mode": "layer", "main_gpu": 0, "no_kv_offload": false, "flash_attn": -1, "devices": "auto", "tensor_split": "0.00", "tensor_buft_overrides": "none", "use_mmap": true, "use_direct_io": false, "embeddings": false, "no_op_offload": 0, "no_host": false, "repack": true, "fit_target": 0, "fit_min_ctx": 0, "n_prompt": 0, "n_gen": 128, "n_depth": 0, "test_time": "2025-04-24T11:59:33Z", "avg_ns": 1068078400, "stddev_ns": 6279455, "avg_ts": 119.844681, "stddev_ts": 0.699739, "samples_ns": [ 1066331700, 1064864900, 1079042600, 1063328400, 1066824400 ],"samples_ts": [ 120.038, 120.203, 118.624, 120.377, 119.982 ]}
+```
+
 
 ### SQL
 
@@ -257,4 +366,55 @@ SQL output creates a `llama_bench` table from the current runtime schema and emi
 
 ```sh
 $ ./llama-bench -o sql | sqlite3 benchmark.sqlite
+$ ./llama-bench -o sql
+```
+
+```sql
+CREATE TABLE IF NOT EXISTS llama_bench (
+  build_commit TEXT,
+  build_number INTEGER,
+  cpu_info TEXT,
+  gpu_info TEXT,
+  backends TEXT,
+  model_filename TEXT,
+  model_type TEXT,
+  model_size INTEGER,
+  model_n_params INTEGER,
+  n_batch INTEGER,
+  n_ubatch INTEGER,
+  n_threads INTEGER,
+  cpu_mask TEXT,
+  cpu_strict INTEGER,
+  poll INTEGER,
+  type_k TEXT,
+  type_v TEXT,
+  n_gpu_layers INTEGER,
+  n_cpu_moe INTEGER,
+  split_mode TEXT,
+  main_gpu INTEGER,
+  no_kv_offload INTEGER,
+  flash_attn INTEGER,
+  devices TEXT,
+  tensor_split TEXT,
+  tensor_buft_overrides TEXT,
+  use_mmap INTEGER,
+  use_direct_io INTEGER,
+  embeddings INTEGER,
+  no_op_offload INTEGER,
+  no_host INTEGER,
+  repack INTEGER,
+  fit_target INTEGER,
+  fit_min_ctx INTEGER,
+  n_prompt INTEGER,
+  n_gen INTEGER,
+  n_depth INTEGER,
+  test_time TEXT,
+  avg_ns INTEGER,
+  stddev_ns INTEGER,
+  avg_ts REAL,
+  stddev_ts REAL
+);
+
+INSERT INTO llama_bench (build_commit, build_number, cpu_info, gpu_info, backends, model_filename, model_type, model_size, model_n_params, n_batch, n_ubatch, n_threads, cpu_mask, cpu_strict, poll, type_k, type_v, n_gpu_layers, n_cpu_moe, split_mode, main_gpu, no_kv_offload, flash_attn, devices, tensor_split, tensor_buft_overrides, use_mmap, use_direct_io, embeddings, no_op_offload, no_host, repack, fit_target, fit_min_ctx, n_prompt, n_gen, n_depth, test_time, avg_ns, stddev_ns, avg_ts, stddev_ts) VALUES ('8cf427ff', '5163', 'AMD Ryzen 7 7800X3D 8-Core Processor', 'NVIDIA GeForce RTX 4080', 'CUDA', 'models/Qwen2.5-7B-Instruct-Q4_K_M.gguf', 'qwen2 7B Q4_K - Medium', '4677120000', '7615616512', '2048', '512', '8', '0x0', '0', '50', 'f16', 'f16', '-1', '0', 'layer', '0', '0', '-1', 'auto', '0.00', 'none', '1', '0', '0', '0', '0', '1', '0', '0', '512', '0', '0', '2025-04-24T12:00:08Z', '69905000', '519516', '7324.546977', '54.032613');
+INSERT INTO llama_bench (build_commit, build_number, cpu_info, gpu_info, backends, model_filename, model_type, model_size, model_n_params, n_batch, n_ubatch, n_threads, cpu_mask, cpu_strict, poll, type_k, type_v, n_gpu_layers, n_cpu_moe, split_mode, main_gpu, no_kv_offload, flash_attn, devices, tensor_split, tensor_buft_overrides, use_mmap, use_direct_io, embeddings, no_op_offload, no_host, repack, fit_target, fit_min_ctx, n_prompt, n_gen, n_depth, test_time, avg_ns, stddev_ns, avg_ts, stddev_ts) VALUES ('8cf427ff', '5163', 'AMD Ryzen 7 7800X3D 8-Core Processor', 'NVIDIA GeForce RTX 4080', 'CUDA', 'models/Qwen2.5-7B-Instruct-Q4_K_M.gguf', 'qwen2 7B Q4_K - Medium', '4677120000', '7615616512', '2048', '512', '8', '0x0', '0', '50', 'f16', 'f16', '-1', '0', 'layer', '0', '0', '-1', 'auto', '0.00', 'none', '1', '0', '0', '0', '0', '1', '0', '0', '0', '128', '0', '2025-04-24T12:00:09Z', '1063608780', '4464130', '120.346696', '0.504647');
 ```
